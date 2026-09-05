@@ -1,0 +1,8 @@
+pickupintoinventory.cfg.ctgy.general=General
+pickupintoinventory.cfg.enabled=Pick up into inventory
+pickupintoinventory.cfg.allowHotbarWhenInventoryFull=Use hotbar when inventory is full (server)
+pickupintoinventory.cfg.allowPlayerOverride=Allow per-player settings (server)
+pickupintoinventory.cfg.resyncAfterPickup=Resend inventory after pickup (server)
+
+key.categories.pickupintoinventory=Pickup Into Inventory
+key.pickupintoinventory.toggle=Toggle pickup into inventory
