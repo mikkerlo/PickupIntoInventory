@@ -1,0 +1,20 @@
+{
+  "modListVersion": 2,
+  "modList": [{
+    "modid": "pickupintoinventory",
+    "name": "Pickup Into Inventory",
+    "description": "Picked-up items fill the main inventory before they fill empty hotbar slots. Toggle it in Mods > Pickup Into Inventory > Config, or with /pickupinv on a server.",
+    "version": "1.2.0",
+    "mcversion": "1.7.10",
+    "authorList": ["greatkorn"],
+    "credits": "",
+    "url": "",
+    "logoFile": "",
+    "screenshots": [],
+    "parent": "",
+    "requiredMods": [],
+    "dependencies": [],
+    "dependants": [],
+    "useDependencyInformation": false
+  }]
+}

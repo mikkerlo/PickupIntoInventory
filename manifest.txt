@@ -1,0 +1,6 @@
+Manifest-Version: 1.0
+FMLCorePluginContainsFMLMod: true
+FMLCorePlugin: net.greatkorn.pickupintoinventory.core.PIICore
+TweakClass: org.spongepowered.asm.launch.MixinTweaker
+MixinConfigs: mixins.pickupintoinventory.json
+ForceLoadAsMod: true
