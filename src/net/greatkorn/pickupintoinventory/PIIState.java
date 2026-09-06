@@ -11,38 +11,55 @@ import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import net.minecraft.entity.player.EntityPlayer;
-
 /**
- * Per-player preferences, held and persisted by whichever side is the logical server.
- * Written from the netty thread when a client sends its preference, so the map is concurrent
- * and file writes are serialised.
+ * What each player has asked for, held and persisted by whichever side is the logical server.
+ * Written from the netty thread when a client sends its preference, so the map is concurrent and
+ * file writes are serialised.
+ *
+ * Three answers, not two. "Follow the server" has to be an answer of its own rather than the
+ * absence of one, because the absence is what lets a client's local setting fill the gap the first
+ * time that player connects. Collapse the two and /pickupinv server is silently replaced by an
+ * explicit override on the very next login, which is the same reason a plain boolean could not
+ * survive a reconnect: the login preference had nothing to distinguish "they chose this" from
+ * "they never said".
+ *
+ * What the choice works out to once the server default and the lock are applied is PIIPolicy's
+ * question, not this class's. Here there is only the choice, as the player left it.
  */
 public final class PIIState {
 
-    private static final Map<UUID, Boolean> OVERRIDES = new ConcurrentHashMap<UUID, Boolean>();
+    /** A player's own answer. Absence from the map means they have never given one. */
+    public enum Choice {
+
+        ON,
+        OFF,
+        SERVER;
+
+        /** How it is written to disk. true/false are exactly what 1.3.0 wrote, so its files load. */
+        String token() {
+            return this == ON ? "true" : this == OFF ? "false" : "server";
+        }
+
+        static Choice parse(String text) {
+            if ("server".equalsIgnoreCase(text)) return SERVER;
+            // Boolean.valueOf is what 1.3.0 parsed with, down to reading anything it does not
+            // recognise as false; keeping that means an existing file is read back unchanged.
+            return Boolean.valueOf(text) ? ON : OFF;
+        }
+    }
+
+    private static final Map<UUID, Choice> OVERRIDES = new ConcurrentHashMap<UUID, Choice>();
     private static final Object SAVE_LOCK = new Object();
     private static File file;
 
     private PIIState() {}
 
-    /** The question the mixin asks on every pickup. */
-    public static boolean isEnabledFor(EntityPlayer player) {
-        if (player == null) return PIIConfig.enabled;
-        // On the client the local config is all there is; the server decides for real.
-        if (player.field_70170_p != null && player.field_70170_p.field_72995_K) return PIIConfig.enabled;
-        if (!PIIConfig.allowPlayerOverride) return PIIConfig.enabled;
-
-        Boolean chosen = OVERRIDES.get(player.func_110124_au());
-        return chosen == null ? PIIConfig.enabled : chosen.booleanValue();
-    }
-
-    /** null = follow the server default. */
-    public static Boolean get(UUID id) {
+    /** null = this player has never chosen, which is not the same as choosing to follow. */
+    public static Choice get(UUID id) {
         return OVERRIDES.get(id);
     }
 
-    public static void set(UUID id, Boolean value) {
+    public static void set(UUID id, Choice value) {
         if (value == null) OVERRIDES.remove(id);
         else OVERRIDES.put(id, value);
         save();
@@ -59,7 +76,7 @@ public final class PIIState {
             p.load(in);
             for (String key : p.stringPropertyNames()) {
                 try {
-                    OVERRIDES.put(UUID.fromString(key), Boolean.valueOf(p.getProperty(key)));
+                    OVERRIDES.put(UUID.fromString(key), Choice.parse(p.getProperty(key)));
                 } catch (IllegalArgumentException bad) {
                     // not a UUID - drop the line rather than fail the whole file
                 }
@@ -75,13 +92,14 @@ public final class PIIState {
         if (file == null) return;
         synchronized (SAVE_LOCK) {
             Properties p = new Properties();
-            for (Map.Entry<UUID, Boolean> e : OVERRIDES.entrySet()) {
-                p.setProperty(e.getKey().toString(), e.getValue().toString());
+            for (Map.Entry<UUID, Choice> e : OVERRIDES.entrySet()) {
+                p.setProperty(e.getKey().toString(), e.getValue().token());
             }
             OutputStream out = null;
             try {
                 out = new FileOutputStream(file);
-                p.store(out, "Per-player overrides for Pickup Into Inventory. true/false per player UUID.");
+                p.store(out, "Per-player choices for Pickup Into Inventory, by player UUID."
+                    + " true = on, false = off, server = follow the server default.");
             } catch (IOException e) {
                 System.err.println("[PickupIntoInventory] could not write " + file + ": " + e);
             } finally {

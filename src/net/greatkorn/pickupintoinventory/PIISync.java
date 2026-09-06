@@ -43,8 +43,21 @@ import cpw.mods.fml.relauncher.Side;
  * Only the slots a pickup really touched. The mixin snapshots main inventory indices 9-35 around
  * addItemStackToInventory and diffs them afterwards, so a merge into an existing partial stack -
  * which never asks getFirstEmptyStack and so never went through the redirect at all - is tracked
- * exactly like a fresh placement. Hotbar indices 0-8 are deliberately left out: those the client
- * applies unconditionally, and during a click it has already predicted them itself.
+ * exactly like a fresh placement. Hotbar indices 0-8 are deliberately left out of that diff: those
+ * the client applies unconditionally, and during a click it has already predicted them itself.
+ *
+ * The one exception is noteForeignSlot, and it is an exception for that very reason. Where the
+ * client predicts an insertion without running the same policy this side is running - it does not
+ * have the mod, has not been told yet, or is too old to be told at all - its prediction lands in a
+ * slot this side did not write, and being predicted is precisely what stops anything else
+ * correcting it. Those slots are marked by hand, since the diff has nothing to see; a hotbar one
+ * goes back as a window-0 set-slot, which handleSetSlot applies unconditionally.
+ *
+ * Repairing a hotbar slot can briefly undo a prediction the quiet gate cannot see, since only
+ * clicks, creative edits and window closes are counted and an item used or a block placed is
+ * neither. It converges the same way everything else here does - the server sends its own update
+ * for that slot immediately afterwards - and it only happens for a client that is already showing
+ * the wrong thing there.
  *
  * The marks are carried by one window-0 S30PacketWindowItems. handleWindowItems applies a window-0
  * packet to inventoryContainer with no test at all - not the windowId comparison, not the
@@ -109,7 +122,11 @@ public final class PIISync {
     /** Vanilla main inventory. Slots past this are appended by other mods and are their business. */
     private static final int MAIN_END = 36;
 
-    /** Indices 0-8 are the hotbar: guaranteed delivery already, and predicted during a click. */
+    /**
+     * Where the pickup diff starts. Indices 0-8 are the hotbar: guaranteed delivery already, and
+     * predicted during a click. Only noteForeignSlot ever marks one, and only because being
+     * predicted is exactly what has gone wrong there.
+     */
     private static final int MAIN_FIRST = 9;
 
     /** Ticks to wait for the confirmation before assuming it is not coming. */
@@ -259,7 +276,7 @@ public final class PIISync {
 
         /** The repair could not be shown to have landed cleanly, so its slots go back on the list. */
         void restoreRepair() {
-            for (int i = MAIN_FIRST; i < MAIN_END; i++) {
+            for (int i = 0; i < MAIN_END; i++) {
                 if (sent[i]) mark(i);
             }
             dropRepair();
@@ -355,12 +372,56 @@ public final class PIISync {
     }
 
     private static boolean tracks(EntityPlayer player) {
-        if (!PIIConfig.resyncAfterPickup) return false;
+        if (!PIIPolicy.resendsAfterPickup()) return false;
         if (!(player instanceof EntityPlayerMP)) return false;
         if (player.field_70170_p == null || player.field_70170_p.field_72995_K) return false;
         // While the player has the redirect switched off their pickups land where vanilla would
         // have put them, and vanilla's own sync is as good or bad as it has always been.
-        return PIIState.isEnabledFor(player);
+        return PIIPolicy.isEnabledFor(player);
+    }
+
+    /**
+     * Whether a slot only the <em>other</em> side may have written is worth marking for this player.
+     *
+     * Deliberately not gated on the redirect being on for them, which is the difference between
+     * this and tracks(). The diff can only ever see slots this side changed, so it is right for it
+     * to stand down when this side is routing exactly as vanilla does - but the divergence runs
+     * both ways. A client still routing while the server is not writes the item into the main
+     * inventory the server left empty, and leaves empty the hotbar slot the server filled, and
+     * neither of those is something the diff will ever see. That is not only a transient: a client
+     * from before the policy answer existed keeps routing on its own config file for good, and on a
+     * server with allowPlayerOverride=false its request is refused and it can never be told
+     * otherwise, so the disagreement is permanent.
+     *
+     * A client that has acknowledged the policy it was sent picks the slots this side picks, so
+     * nothing is marked and nothing is sent; the cost is paid only for clients that cannot be told.
+     */
+    public static boolean repairsForeignSlots(EntityPlayer player) {
+        if (!PIIPolicy.resendsAfterPickup()) return false;
+        if (!(player instanceof EntityPlayerMP)) return false;
+        if (player.field_70170_p == null || player.field_70170_p.field_72995_K) return false;
+        return !PIIPolicy.mirrors(player.func_110124_au());
+    }
+
+    /**
+     * One slot an insertion may have put an item into on a client that is not routing the way this
+     * side is - or left empty where this side filled it.
+     *
+     * Container.slotClick's number-key swap is the case that bites: the client predicts the whole
+     * swap locally, the server accepts the click because the slot that was clicked matched, and
+     * accepting it is exactly what suppresses every corrective packet, so nothing else will ever
+     * tell the client. Anything else the client predicts through this same code - a bucket filled,
+     * a potion drunk - diverges the same way.
+     *
+     * This is the only thing that marks a hotbar slot. Indices 0-8 are otherwise left out on
+     * purpose - the client applies those unconditionally and predicts them itself during a click -
+     * but here the prediction is precisely what is wrong. Marking one costs a single window-0
+     * set-slot packet inside a round that is already going out for the slot beside it.
+     */
+    public static void noteForeignSlot(EntityPlayer player, int slot) {
+        if (slot < 0 || slot >= MAIN_END) return;
+        if (player == null || !repairsForeignSlots(player)) return;
+        pendingFor(player.func_110124_au()).mark(slot);
     }
 
     private static void markStale(EntityPlayer player, int slot) {
@@ -455,7 +516,7 @@ public final class PIISync {
             final Pending pending = PENDING.get(player.func_110124_au());
             if (pending == null) return;
             if (player.field_71135_a == null) return; // logging out; nothing to talk to
-            if (!PIIConfig.resyncAfterPickup) { // switched off under us; stop making traffic
+            if (!PIIPolicy.resendsAfterPickup()) { // switched off under us; stop making traffic
                 PENDING.remove(player.func_110124_au(), pending);
                 return;
             }
@@ -490,7 +551,12 @@ public final class PIISync {
 
         @SubscribeEvent
         public void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
-            PENDING.remove(event.player.func_110124_au());
+            final UUID id = event.player.func_110124_au();
+            PENDING.remove(id);
+            // The other half of this player's session state. What the connection could be told, and
+            // whether it confirmed being told, die with the connection: the next one wearing this
+            // UUID may be a client without the mod at all.
+            PIIPolicy.forget(id);
         }
     }
 
@@ -563,7 +629,9 @@ public final class PIISync {
         // InventoryPlayer through slots of its own, so writing it there updates what is on screen
         // too; nothing is gained by naming that window, and the far end's test is the loss.
         int snapshotUpTo = -1;
-        for (int i = MAIN_FIRST; i < MAIN_END; i++) {
+        // From zero, not from MAIN_FIRST: the diff never marks a hotbar slot, but noteForeignSlot
+        // does, and that mark is worthless if the loop that sends it starts above it.
+        for (int i = 0; i < MAIN_END; i++) {
             if (!pending.sent[i]) continue;
             final Slot slot = own.func_75147_a(inventory, i); // getSlotFromInventory
             if (slot == null) continue; // no slot is showing this index; nothing to repair through
