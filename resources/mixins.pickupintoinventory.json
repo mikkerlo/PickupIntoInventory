@@ -7,7 +7,8 @@
   "mixins": [
     "MixinContainer",
     "MixinInventoryPlayer",
-    "MixinItemPotion"
+    "MixinItemPotion",
+    "MixinNetHandlerPlayServer"
   ],
   "client": [],
   "server": []

@@ -26,7 +26,7 @@ public final class PIIConfig {
     /** Server-authoritative: let players pick their own setting via the GUI or /pickupinv. */
     public static boolean allowPlayerOverride = true;
 
-    /** Server-authoritative: resend the inventory after a redirected pickup so the client sees it. */
+    /** Server-authoritative: resend the slots a pickup changed so the client sees them. */
     public static boolean resyncAfterPickup = true;
 
     public static Configuration config;
@@ -56,10 +56,12 @@ public final class PIIConfig {
                 + "SERVER-SIDE: only the value on the machine running the world applies.");
 
         resyncAfterPickup = prop("resyncAfterPickup", true,
-            "Resend your inventory to the client after a picked-up item is steered out of the hotbar.\n"
+            "Resend the main-inventory slots a pickup changed, so the client sees them.\n"
                 + "1.7.10 only guarantees that hotbar slots reach the client, so without this an item\n"
                 + "can be missing from the inventory screen until something redraws it (pressing sort).\n"
-                + "One packet per player per tick, and only on ticks where a pickup was redirected.\n"
+                + "Only the slots that actually changed are sent, and only on ticks where a pickup\n"
+                + "changed one; each repair is followed by a confirmation the client answers, so a\n"
+                + "click it had in flight at the time is noticed and the repair repeated.\n"
                 + "SERVER-SIDE: only the value on the machine running the world applies.");
 
         if (config.hasChanged()) config.save();
