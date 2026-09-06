@@ -79,13 +79,26 @@ The pinned hashes are the jars a GTNH `daily-2026-09-01` instance ships, so a CI
 against byte-identical inputs to a local one. Remapping Minecraft and Forge is the slow part and is
 cached in `build/tools`; pass `FORCE_REMAP=1` after changing `tools/Remap.java`.
 
-The jar version comes from `resources/mcmod.info`, and CI refuses to publish a `v*` tag whose name
-disagrees with it.
+## Continuous integration
 
-GitHub Actions runs that build on every push and pull request, and attaches the jar to the release
-when a `v*` tag is pushed. It checks that the mod compiles against SRG-mapped Minecraft — which is
-what catches a mistyped `func_*` or a field that moved between versions — but it cannot check that
-the mixin actually applies at load time, or that the behaviour is right. Those still need the game.
+GitHub Actions runs the build on every push and pull request. It checks that the mod compiles
+against SRG-mapped Minecraft — which is what catches a mistyped `func_*` or a field that moved
+between versions — but it cannot check that the mixin actually applies at load time, or that the
+behaviour is right. Those still need the game.
+
+## Releasing
+
+`resources/mcmod.info` holds the version, and it is the only place it is written down: `build.sh`
+names the jar from it and CI releases from it.
+
+To ship a release, bump that version in an ordinary pull request. When the PR merges, CI sees a
+version with no matching tag, creates `v<version>` on the merge commit, and publishes a release with
+the jar attached. Merging a PR that did not touch the version does nothing, so most merges are
+silent.
+
+Nothing has to be tagged by hand: the tag is a consequence of the version rather than a second place
+to keep in sync with it. Re-running a release is harmless, because the tag it created is exactly
+what tells the next run the version is already out.
 
 ## Why the inventory needs resending
 
