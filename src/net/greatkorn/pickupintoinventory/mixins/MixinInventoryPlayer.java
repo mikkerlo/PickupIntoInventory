@@ -4,6 +4,7 @@ import net.greatkorn.pickupintoinventory.PIIConfig;
 import net.greatkorn.pickupintoinventory.PIIContext;
 import net.greatkorn.pickupintoinventory.PIIState;
 import net.greatkorn.pickupintoinventory.PIISync;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.item.ItemStack;
 
@@ -59,6 +60,11 @@ public abstract class MixinInventoryPlayer {
         // to leave. The callers that discard our answer (Container.slotClick's number-key swap has
         // already emptied the slot it is putting this stack back into) would lose it. See PIIContext.
         if (PIIContext.isUncheckedInsert()) return slot;
+
+        // In creative, addItemStackToInventory answers -1 by zeroing the stack and reporting
+        // success instead of leaving the item on the ground, so refusing here deletes it too.
+        final EntityPlayer owner = self.field_70458_d;
+        if (owner != null && owner.field_71075_bZ != null && owner.field_71075_bZ.field_75098_d) return slot;
 
         return PIIConfig.allowHotbarWhenInventoryFull ? slot : -1;
     }
