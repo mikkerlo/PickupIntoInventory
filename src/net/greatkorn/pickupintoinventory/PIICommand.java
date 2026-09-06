@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import net.greatkorn.pickupintoinventory.net.PIINetwork;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.ICommand;
 import net.minecraft.command.ICommandSender;
@@ -61,39 +62,38 @@ public class PIICommand extends CommandBase {
             return;
         }
 
-        if (!PIIConfig.allowPlayerOverride) {
+        if (PIIPolicy.isLocked()) {
             reply(sender, "This server does not allow personal settings. It is currently "
-                + onOff(PIIConfig.enabled) + " for everyone.");
+                + (PIIPolicy.serverDefault() ? "ON" : "OFF") + " for everyone.");
             return;
         }
 
         String arg = args[0].toLowerCase();
         if ("on".equals(arg) || "true".equals(arg)) {
-            PIIState.set(player.func_110124_au(), Boolean.TRUE);
+            PIIState.set(player.func_110124_au(), PIIState.Choice.ON);
         } else if ("off".equals(arg) || "false".equals(arg)) {
-            PIIState.set(player.func_110124_au(), Boolean.FALSE);
+            PIIState.set(player.func_110124_au(), PIIState.Choice.OFF);
         } else if ("server".equals(arg) || "default".equals(arg) || "reset".equals(arg)) {
-            PIIState.set(player.func_110124_au(), null);
+            // Stored as a choice rather than erased. An erased choice is one the player has never
+            // made, and that is what a client's login preference is allowed to fill in - so erasing
+            // it here would hand the setting straight back to the client on the next connect.
+            PIIState.set(player.func_110124_au(), PIIState.Choice.SERVER);
         } else {
             reply(sender, "Usage: " + func_71518_a(sender));
             return;
         }
+        // The client routes pickups on what it was last told, so it has to be told again here or
+        // it goes on predicting the setting the player just changed away from - and its keybind
+        // would toggle from that stale value too, asking for the setting they are already on.
+        PIINetwork.sendPolicy(player, false);
         reply(sender, describe(player));
     }
 
     private String describe(EntityPlayerMP player) {
-        Boolean chosen = PIIState.get(player.func_110124_au());
-        if (!PIIConfig.allowPlayerOverride) {
-            return "Pickup into inventory: " + onOff(PIIConfig.enabled) + " (locked by the server).";
-        }
-        if (chosen == null) {
-            return "Pickup into inventory: " + onOff(PIIConfig.enabled) + " (following the server default).";
-        }
-        return "Pickup into inventory: " + onOff(chosen.booleanValue()) + " (your setting).";
-    }
-
-    private static String onOff(boolean b) {
-        return b ? "ON" : "OFF";
+        return PIIPolicy.describe(
+            PIIPolicy.serverEffective(player.func_110124_au()),
+            PIIPolicy.isLocked(),
+            PIIPolicy.choiceFor(player.func_110124_au()));
     }
 
     private static void reply(ICommandSender sender, String text) {

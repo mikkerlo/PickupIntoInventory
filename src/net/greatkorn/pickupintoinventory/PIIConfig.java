@@ -15,8 +15,14 @@ public final class PIIConfig {
     public static final String LANG = MODID + ".cfg.";
 
     /**
-     * Your own preference. On a server this is what the client asks the server to use for you;
-     * where this copy IS the server it is the default for players who have not chosen.
+     * Your own preference, and nothing else. A client offers it to the server as the setting to use
+     * for you where the server holds none, and the machine running the world copies it once at
+     * startup as the default for players who have not chosen - see PIIPolicy. Nothing reads it live
+     * to decide a pickup, and nothing writes to it once a world is running: on a LAN host, where
+     * this file is the world's default as well as the host's preference, either would make the
+     * host's personal toggle a server-wide policy change. The config screen still edits it, but
+     * that screen is reachable from the title screen, before any world has taken its copy. The keybind asks the server instead, and the server keeps
+     * the answer under the player's UUID like anyone else's.
      */
     public static boolean enabled = true;
 
@@ -42,8 +48,13 @@ public final class PIIConfig {
         enabled = prop("enabled", true,
             "Picked-up items are placed in the main inventory instead of filling empty hotbar slots.\n"
                 + "Items still stack into matching stacks anywhere, hotbar included.\n"
-                + "On a server this is sent as your personal preference; on the server itself it is\n"
-                + "the default for players who have not chosen one.");
+                + "Your personal preference. On a server it is offered as the setting to use for you,\n"
+                + "and the server keeps to a choice you have already made there with the keybind or\n"
+                + "/pickupinv rather than replacing it every time you log in. The keybind changes\n"
+                + "that choice on the server and does not write here.\n"
+                + "On the machine running the world it is also the default for players who have not\n"
+                + "chosen, read once when the world starts - so changing it takes effect there at the\n"
+                + "next world load, not immediately.");
 
         allowHotbarWhenInventoryFull = prop("allowHotbarWhenInventoryFull", true,
             "When the main inventory has no empty slot left, fall back to an empty hotbar slot.\n"
@@ -62,17 +73,12 @@ public final class PIIConfig {
                 + "Only the slots that actually changed are sent, and only on ticks where a pickup\n"
                 + "changed one; each repair is followed by a confirmation the client answers, so a\n"
                 + "click it had in flight at the time is noticed and the repair repeated.\n"
+                + "This also carries the correction for a client that routes pickups differently from\n"
+                + "this server - one too old to be told what is in force for it - so turning it off\n"
+                + "leaves those clients showing items in slots the server never put them in.\n"
                 + "SERVER-SIDE: only the value on the machine running the world applies.");
 
         if (config.hasChanged()) config.save();
-    }
-
-    /** Flips 'enabled' and writes it back to disk, for the in-game keybind. */
-    public static void setEnabled(boolean value) {
-        enabled = value;
-        if (config == null) return;
-        config.get(Configuration.CATEGORY_GENERAL, "enabled", true).set(value);
-        config.save();
     }
 
     private static boolean prop(String key, boolean def, String comment) {

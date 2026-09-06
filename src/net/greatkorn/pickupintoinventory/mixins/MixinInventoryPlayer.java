@@ -1,8 +1,7 @@
 package net.greatkorn.pickupintoinventory.mixins;
 
-import net.greatkorn.pickupintoinventory.PIIConfig;
 import net.greatkorn.pickupintoinventory.PIIContext;
-import net.greatkorn.pickupintoinventory.PIIState;
+import net.greatkorn.pickupintoinventory.PIIPolicy;
 import net.greatkorn.pickupintoinventory.PIISync;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.InventoryPlayer;
@@ -43,15 +42,37 @@ public abstract class MixinInventoryPlayer {
             target = "Lnet/minecraft/entity/player/InventoryPlayer;func_70447_i()I"))
     private int pii$preferMainInventory(InventoryPlayer self) {
         final int slot = self.func_70447_i();
+        final EntityPlayer owner = self.field_70458_d;
 
         // -1 means nothing is free at all; >= 9 means it already picked a non-hotbar slot.
         if (slot < 0 || slot >= PII_HOTBAR_SIZE) return slot;
-        if (!PIIState.isEnabledFor(self.field_70458_d)) return slot;
 
         final ItemStack[] inv = self.field_70462_a;
-        final int limit = Math.min(inv.length, PII_VANILLA_MAIN_SIZE);
-        for (int i = PII_HOTBAR_SIZE; i < limit; i++) {
-            if (inv[i] == null) return i;
+
+        if (!PIIPolicy.isEnabledFor(owner)) {
+            // Leaving the item where vanilla puts it, which is where a client running the same
+            // policy puts it too. A client that is not - one too old to be told, or on a server
+            // that refuses to talk to it - has instead put it in the first empty main slot, so it
+            // is wrong twice over: an item it does not have where vanilla put it, and one it does
+            // have where this side left a gap. The gate is asked before the scan because for
+            // everyone else there is nothing here to do.
+            if (PIISync.repairsForeignSlots(owner)) {
+                final int predicted = pii$firstEmptyMain(inv);
+                if (predicted >= 0) {
+                    PIISync.noteForeignSlot(owner, predicted);
+                    PIISync.noteForeignSlot(owner, slot);
+                }
+            }
+            return slot;
+        }
+
+        final int main = pii$firstEmptyMain(inv);
+        if (main >= 0) {
+            // Vanilla was going to use `slot`, and anything predicting this insertion without
+            // running the same policy has put the item there. Nothing else can notice that: this
+            // side never touches the slot, so the diff around the pickup sees nothing to resend.
+            PIISync.noteForeignSlot(owner, slot);
+            return main;
         }
 
         // Refusing the slot leaves the item on the ground - but only where the caller still has it
@@ -61,10 +82,24 @@ public abstract class MixinInventoryPlayer {
 
         // In creative, addItemStackToInventory answers -1 by zeroing the stack and reporting
         // success instead of leaving the item on the ground, so refusing here deletes it too.
-        final EntityPlayer owner = self.field_70458_d;
         if (owner != null && owner.field_71075_bZ != null && owner.field_71075_bZ.field_75098_d) return slot;
 
-        return PIIConfig.allowHotbarWhenInventoryFull ? slot : -1;
+        // Server-authoritative, and asked of the policy rather than the local config: a client
+        // predicting a swap has to refuse in exactly the places the server refuses, or the two
+        // disagree about where the displaced stack went in the one branch that can also drop it.
+        //
+        // Nothing is marked down here. With no empty main slot there is nowhere for a differently
+        // routing client to have put the item either, so both sides land on the same slot.
+        return PIIPolicy.allowsHotbarFallback(owner) ? slot : -1;
+    }
+
+    /** The slot the redirect steers to, and the slot a client still running it has predicted. */
+    private static int pii$firstEmptyMain(ItemStack[] inv) {
+        final int limit = Math.min(inv.length, PII_VANILLA_MAIN_SIZE);
+        for (int i = PII_HOTBAR_SIZE; i < limit; i++) {
+            if (inv[i] == null) return i;
+        }
+        return -1;
     }
 
     /**

@@ -8,6 +8,7 @@ import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.SidedProxy;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
+import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 
 @Mod(
     modid = PIIConfig.MODID,
@@ -32,8 +33,18 @@ public class PickupIntoInventory {
         proxy.preInit();
     }
 
+    /**
+     * The world's policy is fixed here, before anyone can join, and nothing the host's own client
+     * does to their config afterwards moves it again. See PIIPolicy.
+     */
     @Mod.EventHandler
     public void serverStarting(FMLServerStartingEvent event) {
+        PIIPolicy.startServer();
         event.registerServerCommand(new PIICommand());
+    }
+
+    @Mod.EventHandler
+    public void serverStopped(FMLServerStoppedEvent event) {
+        PIIPolicy.stopServer();
     }
 }

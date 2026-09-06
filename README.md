@@ -26,10 +26,10 @@ Affected:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | Your preference. Sent to the server as your personal setting; on the server itself, the default for players who have not chosen. |
+| `enabled` | `true` | Your preference. Offered to the server as the setting to use for you where it holds none; on the machine running the world, also the default for players who have not chosen. |
 | `allowHotbarWhenInventoryFull` | `true` | When the main inventory is full, still use an empty hotbar slot. `false` leaves the item on the ground. **Server-side.** |
 | `allowPlayerOverride` | `true` | Let players choose for themselves. `false` forces `enabled` on everyone. **Server-side.** |
-| `resyncAfterPickup` | `true` | Resend the main-inventory slots a pickup changed, so the item shows up immediately. **Server-side.** |
+| `resyncAfterPickup` | `true` | Repair the slots a pickup changed, so the item shows up immediately — and the slots a client routing differently got wrong. **Server-side.** |
 
 `allowHotbarWhenInventoryFull=false` is a *pickup* policy: it only applies where refusing the slot
 leaves the item somewhere it can still be picked up. It is not applied where the caller throws the
@@ -40,33 +40,67 @@ there would delete the stack outright, so those two calls keep the main-inventor
 always fall back to the hotbar slot vanilla had counted on. Every other vanilla caller checks the
 result and keeps the item.
 
-GUI edits apply immediately — no restart.
+GUI edits apply immediately for your own preference. The three server-side options are copied by
+the machine running the world when the world starts, so changing one there takes effect at the next
+world load rather than under the players already connected.
 
 ## Per-player settings on a server
 
 The decision is made server-side, so the server needs the jar. But it is made **per player**, and
-there are two ways to set it:
+there are three ways to set it:
 
 * **Keybind** — `Options` → `Controls`, category *Pickup Into Inventory*. Unbound by default
   (GTNH has hundreds of binds; any default would collide). This is the only in-game toggle: the
-  Mods config screen is reachable from the title screen only.
-* **Config GUI** — title screen → `Mods (…)` → `Pickup Into Inventory` → `Config`. Sends your
-  choice to the server, on connect and on every change.
+  Mods config screen is reachable from the title screen only. It toggles what is actually in force
+  for you, so a press straight after a `/pickupinv` does what it looks like it does, and the line it
+  prints is the server's answer rather than the request. It changes your setting **on that server**,
+  which is where it is kept — it does not write to your config file, because on a LAN world that
+  file is also the default every guest runs on. On a server without the mod it says so and does
+  nothing.
+* **Config GUI** — title screen → `Mods (…)` → `Pickup Into Inventory` → `Config`. An edit made
+  with no server to tell is sent as soon as you next connect.
 * **`/pickupinv [on|off|server]`** — works from any client, including one without the mod, and
-  needs no op status. `server` clears your choice and follows the server default.
+  needs no op status. `server` follows the server default — and is remembered as that, so it is not
+  quietly turned back into an explicit on/off the next time you log in.
+
+Your local `enabled` is a **default, not an instruction**. On connect the client offers it, and the
+server uses it only where it holds no choice for you; a setting you made on that server with the
+keybind, the config screen or `/pickupinv` wins over it and survives reconnecting. A change you make
+while there is nobody to tell is sent as a real change on the next connect, so it is not ignored.
 
 Choices are keyed by player UUID (profile-derived, so stable) and persisted in
-`config/pickupintoinventory_players.properties` on the server. An admin can set
-`allowPlayerOverride=false` to take the choice away and pin everyone to the server's `enabled`.
-
-The client-to-server message rides a `PickupIntoInv` channel; if the server does not have the mod
-the payload is simply dropped there, so a client-only install stays harmless.
+`config/pickupintoinventory_players.properties` on the server, as `true`, `false` or `server`. An
+admin can set `allowPlayerOverride=false` to take the choice away and pin everyone to the server's
+`enabled`; choices are kept but ignored while that is on, and both the command and the keybind say
+so instead of pretending the request landed.
 
 ## Sides
 
-The routing runs on the **logical server**. Singleplayer works with a client-only install (the
-integrated server is the same JVM). On a dedicated server the jar must be installed **server-side**.
-`acceptableRemoteVersions="*"` so it never blocks a connection.
+The routing runs on the **logical server**, and the client only ever mirrors what the server tells
+it applies to that player — it does not route on its own config, and does not route at all until it
+has been told. That is what keeps the two sides predicting the same inventory: the number-key swap
+in a container GUI runs on both, so two sides disagreeing about the setting would put the displaced
+stack in different slots and the click would still be accepted.
+
+Singleplayer and a LAN world work with a client-only install (the integrated server is the same
+JVM), and the host's own preference travels the same way a guest's does — pressing the keybind
+changes the setting for the host, not the default every guest runs on. The world's copy of the
+server-side options is taken once when it starts, so nothing the host does to their own config
+afterwards moves policy under the people connected to them.
+
+On a dedicated server the jar must be installed **server-side**. Installed there and not on a
+client, the server still routes pickups and repairs what the client got wrong; installed on a client
+and not on the server, nothing happens at all, which is the only safe answer when there is no server
+policy to follow. `acceptableRemoteVersions="*"` so it never blocks a connection.
+
+The two messages ride a `PickupIntoInv` channel. If the server does not have the mod the client's
+payload is dropped there, and the server only ever sends the policy back to a client that has
+identified itself as understanding it, so a client from before this change is answered exactly the
+way it always was — which also means such a client still cannot keep a `/pickupinv` choice across a
+reconnect, and still routes on its own config. The server repairs what that costs: whenever it
+cannot know a client is routing the way it is, it also resends the slots only the other side can
+have written. A newer client on an older server reads there as the older client it replaces, because
+the new fields are on the end of the message where an older server ignores them.
 
 ## Building
 
