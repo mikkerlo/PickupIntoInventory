@@ -3,7 +3,6 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -50,35 +49,54 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Tag pushes only. Attaches the built jar to the matching GitHub release.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Pushes to main only. resources/mcmod.info is the single source of truth for the
+    # version: when it names one that has no tag yet, that push is the release.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Two pushes landing together must not race to publish the same version.
+    concurrency:
+      group: release-main
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check the tag matches the version in mcmod.info
+      - name: Decide whether this is a new version
+        id: check
         run: |
           ver=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' resources/mcmod.info | head -1)
-          if [ "${GITHUB_REF_NAME#v}" != "$ver" ]; then
-            echo "tag $GITHUB_REF_NAME does not match mcmod.info version $ver" >&2
+          if [ -z "$ver" ]; then
+            echo "could not read version from resources/mcmod.info" >&2
             exit 1
+          fi
+          case "$ver" in
+            [0-9]*) ;;
+            *) echo "version '$ver' should start with a digit" >&2; exit 1 ;;
+          esac
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          if [ -n "$(git ls-remote --tags origin "refs/tags/v$ver")" ]; then
+            echo "v$ver is already tagged - nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$ver has no tag yet - releasing it"
+            echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/download-artifact@v8
+        if: steps.check.outputs.release == 'true'
         with:
           name: pickupintoinventory
           path: dist
 
-      - name: Attach the jar to the release
+      - name: Tag the commit and publish the release
+        if: steps.check.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.check.outputs.version }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.jar --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/*.jar \
-              --title "$GITHUB_REF_NAME" --generate-notes
-          fi
+          gh release create "v$VER" dist/*.jar \
+            --target "$GITHUB_SHA" \
+            --title "v$VER" \
+            --generate-notes
