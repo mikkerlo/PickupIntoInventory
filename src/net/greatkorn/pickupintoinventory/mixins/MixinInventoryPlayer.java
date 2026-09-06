@@ -1,6 +1,7 @@
 package net.greatkorn.pickupintoinventory.mixins;
 
 import net.greatkorn.pickupintoinventory.PIIConfig;
+import net.greatkorn.pickupintoinventory.PIIContext;
 import net.greatkorn.pickupintoinventory.PIIState;
 import net.greatkorn.pickupintoinventory.PIISync;
 import net.minecraft.entity.player.InventoryPlayer;
@@ -53,6 +54,11 @@ public abstract class MixinInventoryPlayer {
                 return i;
             }
         }
+
+        // Refusing the slot leaves the item on the ground - but only where the caller still has it
+        // to leave. The callers that discard our answer (Container.slotClick's number-key swap has
+        // already emptied the slot it is putting this stack back into) would lose it. See PIIContext.
+        if (PIIContext.isUncheckedInsert()) return slot;
 
         return PIIConfig.allowHotbarWhenInventoryFull ? slot : -1;
     }

@@ -31,6 +31,15 @@ Affected:
 | `allowPlayerOverride` | `true` | Let players choose for themselves. `false` forces `enabled` on everyone. **Server-side.** |
 | `resyncAfterPickup` | `true` | Resend the inventory to the client after a redirected pickup, so the item shows up immediately. **Server-side.** |
 
+`allowHotbarWhenInventoryFull=false` is a *pickup* policy: it only applies where refusing the slot
+leaves the item somewhere it can still be picked up. It is not applied where the caller throws the
+`addItemStackToInventory` result away — the number-key swap in a container GUI (`Container.slotClick`
+mode 2), which has already overwritten the hotbar slot with the container item before handing over
+the stack that was displaced from it, and `ItemPotion.onEaten` returning the empty bottle. Refusing
+there would delete the stack outright, so those two calls keep the main-inventory preference but
+always fall back to the hotbar slot vanilla had counted on. Every other vanilla caller checks the
+result and keeps the item.
+
 GUI edits apply immediately — no restart.
 
 ## Per-player settings on a server
