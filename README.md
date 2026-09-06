@@ -66,8 +66,26 @@ notch→SRG CSVs that FalsePatternLib ships, so no MCP/Gradle toolchain is neede
 `@Redirect` targets are written as SRG names directly, so no refmap is generated or required
 (annotation processing is off — the Mixin AP would otherwise demand a mapping file).
 
-Requires: JDK 17, a GTNH instance (for `falsepatternlib` and `unimixins`), and the Prism/Forge
-`libraries` dir.
+Requires JDK 17 and the five dependency jars. By default they are read out of a local GTNH
+instance (`GTNH` = the `.minecraft` dir, `LIBS` = the launcher's `libraries` dir). If you do not
+have one, `ci/fetch-deps.sh` downloads all five from their public homes — Mojang, Forge's Maven,
+Maven Central, and the UniMixins/FalsePatternLib GitHub releases — and verifies each by SHA-1:
+
+```sh
+ci/fetch-deps.sh && source build/deps/env.sh && ./build.sh
+```
+
+The pinned hashes are the jars a GTNH `daily-2026-09-01` instance ships, so a CI build compiles
+against byte-identical inputs to a local one. Remapping Minecraft and Forge is the slow part and is
+cached in `build/tools`; pass `FORCE_REMAP=1` after changing `tools/Remap.java`.
+
+The jar version comes from `resources/mcmod.info`, and CI refuses to publish a `v*` tag whose name
+disagrees with it.
+
+GitHub Actions runs that build on every push and pull request, and attaches the jar to the release
+when a `v*` tag is pushed. It checks that the mod compiles against SRG-mapped Minecraft — which is
+what catches a mistyped `func_*` or a field that moved between versions — but it cannot check that
+the mixin actually applies at load time, or that the behaviour is right. Those still need the game.
 
 ## Why the inventory needs resending
 

@@ -1,0 +1,84 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Both caches are keyed on ci/fetch-deps.sh, which holds the pinned versions and
+      # SHA-1s; bumping a dependency there invalidates the downloads and the remap together.
+      - name: Cache dependency jars
+        uses: actions/cache@v6
+        with:
+          path: build/deps
+          key: deps-${{ hashFiles('ci/fetch-deps.sh') }}
+
+      - name: Cache SRG-remapped Minecraft and Forge
+        uses: actions/cache@v6
+        with:
+          path: build/tools
+          key: srg-${{ hashFiles('ci/fetch-deps.sh', 'tools/Remap.java') }}
+
+      - name: Fetch dependencies
+        run: ci/fetch-deps.sh
+
+      - name: Build
+        run: |
+          source build/deps/env.sh
+          ./build.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pickupintoinventory
+          path: build/pickupintoinventory-*.jar
+          if-no-files-found: error
+
+  release:
+    # Tag pushes only. Attaches the built jar to the matching GitHub release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches the version in mcmod.info
+        run: |
+          ver=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' resources/mcmod.info | head -1)
+          if [ "${GITHUB_REF_NAME#v}" != "$ver" ]; then
+            echo "tag $GITHUB_REF_NAME does not match mcmod.info version $ver" >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pickupintoinventory
+          path: dist
+
+      - name: Attach the jar to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.jar --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.jar \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
