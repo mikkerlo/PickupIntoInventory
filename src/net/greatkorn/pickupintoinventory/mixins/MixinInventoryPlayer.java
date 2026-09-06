@@ -10,7 +10,9 @@ import net.minecraft.item.ItemStack;
 
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Vanilla routes a picked-up item to the first empty slot of mainInventory, and the hotbar is
@@ -49,11 +51,7 @@ public abstract class MixinInventoryPlayer {
         final ItemStack[] inv = self.field_70462_a;
         final int limit = Math.min(inv.length, PII_VANILLA_MAIN_SIZE);
         for (int i = PII_HOTBAR_SIZE; i < limit; i++) {
-            if (inv[i] == null) {
-                // Slots 9-35 have no guaranteed sync path to the client; ask for a resend.
-                PIISync.markDirty(self.field_70458_d);
-                return i;
-            }
+            if (inv[i] == null) return i;
         }
 
         // Refusing the slot leaves the item on the ground - but only where the caller still has it
@@ -67,5 +65,28 @@ public abstract class MixinInventoryPlayer {
         if (owner != null && owner.field_71075_bZ != null && owner.field_71075_bZ.field_75098_d) return slot;
 
         return PIIConfig.allowHotbarWhenInventoryFull ? slot : -1;
+    }
+
+    /**
+     * Slots 9-35 have no guaranteed sync path to the client, so whatever a pickup puts there has to
+     * be resent by hand. Which slots those are cannot be read off the redirect above: only the
+     * placement paths ask getFirstEmptyStack, while storePartialItemStack merges into an existing
+     * partial stack through storeItemStack and never comes near it - so a second pickup topping up
+     * a stack the first one created would go unnoticed, and stay stale on the client for as long as
+     * nothing else happens to rewrite the slot.
+     *
+     * addItemStackToInventory is the one door into all of that (storePartialItemStack is private
+     * and has no other caller), so the slots are taken before and compared after. That catches
+     * placements, merges, an item spread over several partial stacks, and anything a mod does to
+     * the same array while the call is running.
+     */
+    @Inject(method = "func_70441_a(Lnet/minecraft/item/ItemStack;)Z", at = @At("HEAD"))
+    private void pii$watchPickup(ItemStack stack, CallbackInfoReturnable<Boolean> callback) {
+        PIISync.beginPickup((InventoryPlayer) (Object) this);
+    }
+
+    @Inject(method = "func_70441_a(Lnet/minecraft/item/ItemStack;)Z", at = @At("RETURN"))
+    private void pii$reconcilePickup(ItemStack stack, CallbackInfoReturnable<Boolean> callback) {
+        PIISync.endPickup((InventoryPlayer) (Object) this);
     }
 }

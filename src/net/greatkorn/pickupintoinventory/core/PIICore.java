@@ -21,7 +21,8 @@ public class PIICore implements IFMLLoadingPlugin, IEarlyMixinLoader {
 
     @Override
     public List<String> getMixins(Set<String> loadedCoreMods) {
-        return Arrays.asList("MixinContainer", "MixinInventoryPlayer", "MixinItemPotion");
+        return Arrays
+            .asList("MixinContainer", "MixinInventoryPlayer", "MixinItemPotion", "MixinNetHandlerPlayServer");
     }
 
     @Override
