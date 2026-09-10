@@ -80,18 +80,29 @@ public abstract class MixinInventoryPlayer {
             return main;
         }
 
-        // Refusing the slot leaves the item on the ground - but only where the caller still has it
-        // to leave. The callers that discard our answer (Container.slotClick's number-key swap has
-        // already emptied the slot it is putting this stack back into) would lose it. See PIIContext.
-        if (PIIContext.isUncheckedInsert()) return slot;
+        // Refusing the slot leaves the item on the ground - but only for the one caller that still
+        // has it to leave, which is the EntityItem walked into. Everyone else either keeps the item
+        // somewhere of their own choosing, where refusing gains nothing, or throws the answer away,
+        // where it destroys the stack: Container.slotClick's number-key swap has already emptied the
+        // slot it is putting this one back into, and 25 mods in one pack do the same. Asking who may
+        // be refused rather than who must not be is what keeps that list from going stale. See
+        // PIIContext.
+        if (!PIIContext.isGroundPickup()) return slot;
 
         // In creative, addItemStackToInventory answers -1 by zeroing the stack and reporting
-        // success instead of leaving the item on the ground, so refusing here deletes it too.
-        if (owner != null && owner.field_71075_bZ != null && owner.field_71075_bZ.field_75098_d) return slot;
+        // success instead of leaving the item on the ground, so refusing here deletes it too - and
+        // a ground pickup reaches that branch like any other, which is why this outlives the check
+        // above rather than being covered by it. PlayerCapabilities is assigned while EntityPlayer
+        // is still being constructed, so only the owner itself is worth testing for null.
+        if (owner != null && owner.field_71075_bZ.field_75098_d) return slot;
 
-        // Server-authoritative, and asked of the policy rather than the local config: a client
-        // predicting a swap has to refuse in exactly the places the server refuses, or the two
-        // disagree about where the displaced stack went in the one branch that can also drop it.
+        // Asked of the policy rather than the local config, though nothing now depends on the
+        // client holding the same answer: a ground pickup only ever happens on the server, so this
+        // is the one line in the redirect the client cannot reach. Refusing used to be reachable
+        // through the number-key swap, which both sides run, and the two disagreeing there put the
+        // displaced stack in different slots on a click that was still accepted. That divergence is
+        // gone with the whitelist inverted - both sides now take the branch above - and the client's
+        // copy of the setting is kept as a guard rather than as something it routes on.
         //
         // A refusal is a divergence, and one nothing else can see: this side writes no slot, so
         // the diff around the pickup finds nothing to resend, while a client that is not running
