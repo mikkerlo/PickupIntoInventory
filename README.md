@@ -69,10 +69,15 @@ keybind, the config screen or `/pickupinv` wins over it and survives reconnectin
 while there is nobody to tell is sent as a real change on the next connect, so it is not ignored.
 
 Choices are keyed by player UUID (profile-derived, so stable) and persisted in
-`config/pickupintoinventory_players.properties` on the server, as `true`, `false` or `server`. An
-admin can set `allowPlayerOverride=false` to take the choice away and pin everyone to the server's
-`enabled`; choices are kept but ignored while that is on, and both the command and the keybind say
-so instead of pretending the request landed.
+`config/pickupintoinventory_players.properties` on the server, as `true`, `false` or `server`.
+That file is written by a background thread a moment after a change rather than inside the tick
+that made it, so a burst of changes costs one write instead of one write each and no number of
+them can hold the server up; a request for the setting you are already on is not a change and
+writes nothing at all. The file is replaced atomically, so a write interrupted part way through
+leaves the previous one whole rather than an empty stub, and the world's stop finishes any writing
+still outstanding before it ends. An admin can set `allowPlayerOverride=false` to take the choice
+away and pin everyone to the server's `enabled`; choices are kept but ignored while that is on,
+and both the command and the keybind say so instead of pretending the request landed.
 
 ## Sides
 
