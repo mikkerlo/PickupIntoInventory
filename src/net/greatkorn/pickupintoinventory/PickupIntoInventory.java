@@ -43,8 +43,16 @@ public class PickupIntoInventory {
         event.registerServerCommand(new PIICommand());
     }
 
+    /**
+     * The preferences file is written off the tick loop now, so a /pickupinv run in the seconds
+     * before a stop can still be nothing but a counter in memory when the world ends. On a
+     * dedicated server the JVM goes with it, and on a client leaving a world nothing would write it
+     * either, since the writer is a daemon and the next world load reads the file back. So the last
+     * thing the world does is finish the writing, on this thread, before anything else is torn down.
+     */
     @Mod.EventHandler
     public void serverStopped(FMLServerStoppedEvent event) {
+        PIIState.flush();
         PIIPolicy.stopServer();
     }
 }
