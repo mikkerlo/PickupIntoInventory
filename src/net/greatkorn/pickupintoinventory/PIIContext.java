@@ -1,49 +1,54 @@
 package net.greatkorn.pickupintoinventory;
 
 /**
- * Marks the stretch of a call where the caller <em>discards</em> the boolean that
- * addItemStackToInventory returns. There, refusing a slot does not leave the item anywhere - it
- * deletes it.
+ * Marks the stretch of a call in which refusing a slot is safe - that is, in which the caller still
+ * has the item and will keep it when addItemStackToInventory answers false.
  *
- * Container.slotClick's number-key swap (mode 2) is the case that matters. It asks the unmodified
- * getFirstEmptyStack for a slot, overwrites the selected hotbar slot with the clicked container
- * item, and only then hands the stack that used to live there to addItemStackToInventory,
- * discarding the boolean - it already checked, so as far as it is concerned a slot is waiting.
- * Answering -1 at that point, which allowHotbarWhenInventoryFull=false otherwise does once slots
- * 9-35 are full, destroys that stack: it is not in the inventory, not on the cursor, not on the
- * ground. ItemPotion.onEaten does the same with the empty bottle it hands back after a drink.
+ * There is exactly one such caller, and the mark is deliberately that way round. "Leave it on the
+ * ground" only means anything where there is a ground to leave it on, which is
+ * EntityItem.onCollideWithPlayer and nothing else: it checks the result and lets the EntityItem
+ * live when the insert failed. Every other caller either checks the result and puts the item
+ * somewhere of its own choosing - where refusing changes nothing we have any business changing - or
+ * throws the result away, and there refusing destroys the stack outright.
  *
- * (Those are the only two: every other addItemStackToInventory call in 1.7.10 - EntityItem,
- * SlotCrafting, ItemBucket, ItemGlassBottle, ItemEmptyMap, EntityArrow, EntityCow, EntityMooshroom,
- * BlockCauldron - branches on the result and keeps the item when it is false.)
+ * Naming the unsafe callers instead was the obvious first answer, because in vanilla there are only
+ * two: Container.slotClick's number-key swap, which has already overwritten the hotbar slot with the
+ * clicked container item before handing over the stack displaced from it, and ItemPotion.onEaten
+ * returning the empty bottle. Mod code does not stay that small. A scan of one 243-jar pack turned
+ * up 36 discarding call sites across 25 mods, among them bogosorter, Thaumcraft, CoFH, TConstruct,
+ * LogisticsPipes, Witchery and GregTech - so a list of who must not be refused is a list that has to
+ * be rewritten every time the pack changes, and is wrong in the player's favour only by accident.
+ * A list of who may be refused is one caller, in Minecraft, and cannot go stale.
  *
- * "Leave it on the ground" is a pickup policy and only holds where the caller still has an item to
- * leave. Inside this marker the mixin keeps its main-inventory preference but never answers -1, so
- * the empty slot vanilla already counted on is used and nothing is lost.
+ * What it costs is that allowHotbarWhenInventoryFull=false no longer holds for an item a mod hands
+ * over directly - a magnet, a quest reward, a machine emptying into the player - which takes the
+ * hotbar slot instead of being left where it was. That is the trade: the setting is weaker in
+ * places it was never reliable anyway, and no configuration of this mod can delete an item.
  *
  * Thread-local: in singleplayer the logical client and the logical server run this code on separate
- * threads. Nesting-safe, so a mod wrapping the same call cannot clear the mark early.
+ * threads, and only the server ever picks anything up off the ground. Nesting-safe, so a mod
+ * wrapping the same call cannot clear the mark early.
  */
 public final class PIIContext {
 
-    private static final ThreadLocal<Boolean> UNCHECKED = new ThreadLocal<Boolean>();
+    private static final ThreadLocal<Boolean> GROUND_PICKUP = new ThreadLocal<Boolean>();
 
     private PIIContext() {}
 
-    /** @return the value to hand back to {@link #endUncheckedInsert(boolean)} when the call returns. */
-    public static boolean beginUncheckedInsert() {
-        final boolean previous = isUncheckedInsert();
-        UNCHECKED.set(Boolean.TRUE);
+    /** @return the value to hand back to {@link #endGroundPickup(boolean)} when the call returns. */
+    public static boolean beginGroundPickup() {
+        final boolean previous = isGroundPickup();
+        GROUND_PICKUP.set(Boolean.TRUE);
         return previous;
     }
 
-    public static void endUncheckedInsert(boolean previous) {
-        if (previous) UNCHECKED.set(Boolean.TRUE);
-        else UNCHECKED.remove();
+    public static void endGroundPickup(boolean previous) {
+        if (previous) GROUND_PICKUP.set(Boolean.TRUE);
+        else GROUND_PICKUP.remove();
     }
 
-    /** True while a refused insertion would delete the stack rather than leave it where it was. */
-    public static boolean isUncheckedInsert() {
-        return Boolean.TRUE.equals(UNCHECKED.get());
+    /** True while a refused insertion would leave the item where it was rather than destroy it. */
+    public static boolean isGroundPickup() {
+        return Boolean.TRUE.equals(GROUND_PICKUP.get());
     }
 }

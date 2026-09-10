@@ -27,18 +27,33 @@ Affected:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Your preference. Offered to the server as the setting to use for you where it holds none; on the machine running the world, also the default for players who have not chosen. |
-| `allowHotbarWhenInventoryFull` | `true` | When the main inventory is full, still use an empty hotbar slot. `false` leaves the item on the ground. **Server-side.** |
+| `allowHotbarWhenInventoryFull` | `true` | When the main inventory is full, still use an empty hotbar slot. `false` leaves the item on the ground — for items collected off the ground, in survival, and nowhere else (see below). **Server-side.** |
 | `allowPlayerOverride` | `true` | Let players choose for themselves. `false` forces `enabled` on everyone. **Server-side.** |
 | `resyncAfterPickup` | `true` | Repair the slots a pickup changed, so the item shows up immediately — and the slots a client routing differently got wrong. **Server-side.** |
 
-`allowHotbarWhenInventoryFull=false` is a *pickup* policy: it only applies where refusing the slot
-leaves the item somewhere it can still be picked up. It is not applied where the caller throws the
-`addItemStackToInventory` result away — the number-key swap in a container GUI (`Container.slotClick`
-mode 2), which has already overwritten the hotbar slot with the container item before handing over
-the stack that was displaced from it, and `ItemPotion.onEaten` returning the empty bottle. Refusing
-there would delete the stack outright, so those two calls keep the main-inventory preference but
-always fall back to the hotbar slot vanilla had counted on. Every other vanilla caller checks the
-result and keeps the item.
+`allowHotbarWhenInventoryFull=false` is a *pickup* policy, and it is applied in exactly one place:
+an item you walk into and collect off the ground (`EntityItem.onCollideWithPlayer`). That is the
+only caller that still has the item to leave — it checks the result and lets the `EntityItem` live
+when the insert failed. Everywhere else the main-inventory preference still applies but the refusal
+does not, so the empty hotbar slot the caller was counting on is used.
+
+Refusing a slot to a caller that throws the `addItemStackToInventory` result away does not leave the
+item anywhere: it deletes the stack. Vanilla has two such callers — the number-key swap in a
+container GUI (`Container.slotClick` mode 2), which has already overwritten the hotbar slot with the
+container item before handing over the stack displaced from it, and `ItemPotion.onEaten` returning
+the empty bottle. Mod code has many more: a scan of one 243-jar pack found 36 discarding call sites
+across 25 mods. Naming the callers that must not be refused is a list that has to be rewritten every
+time the pack changes; naming the one caller that may be is a list that cannot go stale.
+
+So `false` no longer holds for an item handed over directly by a mod — a magnet, a quest reward, a
+machine emptying into you — which takes the hotbar slot rather than being left where it was. That is
+the trade: the setting is weaker in places it was never reliable, and no configuration of this mod
+can destroy an item.
+
+In **creative** the refusal is skipped as well, ground pickups included. Vanilla's creative branch in
+`addItemStackToInventory` zeroes the stack and reports success when it finds no slot, rather than
+leaving the item where it was, so refusing there deletes it too. `allowHotbarWhenInventoryFull` is a
+survival-mode setting in practice.
 
 GUI edits apply immediately for your own preference. The three server-side options are copied by
 the machine running the world when the world starts, so changing one there takes effect at the next

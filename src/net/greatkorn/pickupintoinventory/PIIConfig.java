@@ -26,7 +26,12 @@ public final class PIIConfig {
      */
     public static boolean enabled = true;
 
-    /** Server-authoritative: when the main inventory is full, fall back to an empty hotbar slot. */
+    /**
+     * Server-authoritative: when the main inventory is full, fall back to an empty hotbar slot.
+     * false leaves the item on the ground, and only ever for an item picked up off the ground by a
+     * survival player - everywhere else refusing the slot would delete the stack instead of leaving
+     * it anywhere, so the fallback is taken regardless. See PIIContext.
+     */
     public static boolean allowHotbarWhenInventoryFull = true;
 
     /** Server-authoritative: let players pick their own setting via the GUI or /pickupinv. */
@@ -59,6 +64,11 @@ public final class PIIConfig {
         allowHotbarWhenInventoryFull = prop("allowHotbarWhenInventoryFull", true,
             "When the main inventory has no empty slot left, fall back to an empty hotbar slot.\n"
                 + "Set to false to leave the item on the ground instead.\n"
+                + "That applies to an item picked up off the ground, in survival, and nowhere else.\n"
+                + "A number-key swap in a container GUI, an item a mod hands you directly (a magnet,\n"
+                + "a quest reward, a machine emptying into you), and any pickup in creative all keep\n"
+                + "the main-inventory preference but always take the hotbar slot: those callers have\n"
+                + "nowhere to leave the item, so refusing would delete it rather than drop it.\n"
                 + "SERVER-SIDE: only the value on the machine running the world applies.");
 
         allowPlayerOverride = prop("allowPlayerOverride", true,

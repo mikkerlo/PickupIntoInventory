@@ -5,9 +5,8 @@
   "target": "@env(DEFAULT)",
   "compatibilityLevel": "JAVA_8",
   "mixins": [
-    "MixinContainer",
+    "MixinEntityItem",
     "MixinInventoryPlayer",
-    "MixinItemPotion",
     "MixinNetHandlerPlayServer"
   ],
   "client": [],
