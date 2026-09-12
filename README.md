@@ -31,19 +31,21 @@ Affected:
 | `allowPlayerOverride` | `true` | Let players choose for themselves. `false` forces `enabled` on everyone. **Server-side.** |
 | `resyncAfterPickup` | `true` | Repair the slots a pickup changed, so the item shows up immediately — and the slots a client routing differently got wrong. **Server-side.** |
 
-`allowHotbarWhenInventoryFull=false` is a *pickup* policy, and it is applied in exactly one place:
-an item you walk into and collect off the ground (`EntityItem.onCollideWithPlayer`). That is the
-only caller that still has the item to leave — it checks the result and lets the `EntityItem` live
-when the insert failed. Everywhere else the main-inventory preference still applies but the refusal
-does not, so the empty hotbar slot the caller was counting on is used.
+`allowHotbarWhenInventoryFull=false` is a *pickup* policy, and it is applied in exactly two places:
+an item you walk into and collect off the ground (`EntityItem.onCollideWithPlayer`), and an arrow
+stuck in the ground that you walk into (`EntityArrow.onCollideWithPlayer`). Those are the only
+callers that still have the item to leave — each checks the result and lets the entity live when
+the insert failed. Everywhere else the main-inventory preference still applies but the refusal does
+not, so the empty hotbar slot the caller was counting on is used.
 
 Refusing a slot to a caller that throws the `addItemStackToInventory` result away does not leave the
 item anywhere: it deletes the stack. Vanilla has two such callers — the number-key swap in a
 container GUI (`Container.slotClick` mode 2), which has already overwritten the hotbar slot with the
 container item before handing over the stack displaced from it, and `ItemPotion.onEaten` returning
-the empty bottle. Mod code has many more: a scan of one 243-jar pack found 36 discarding call sites
-across 25 mods. Naming the callers that must not be refused is a list that has to be rewritten every
-time the pack changes; naming the one caller that may be is a list that cannot go stale.
+the empty bottle. Mod code has many more — inserting and ignoring the answer is a common idiom in
+backpack returns, machine output-to-player and quest rewards. Naming the callers that must not be
+refused is a list that has to be rewritten every time the pack changes; naming the two callers that
+may be is a list that cannot go stale.
 
 So `false` no longer holds for an item handed over directly by a mod — a magnet, a quest reward, a
 machine emptying into you — which takes the hotbar slot rather than being left where it was. That is

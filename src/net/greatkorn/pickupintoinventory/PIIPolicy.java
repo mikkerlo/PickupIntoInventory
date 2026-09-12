@@ -251,9 +251,17 @@ public final class PIIPolicy {
     }
 
     /**
-     * Whether refusing the last empty hotbar slot is allowed. Server-authoritative like the rest,
-     * so a client predicting a swap refuses in the same places the server does; unknown means never
-     * refuse, which is what vanilla does and the only answer that cannot lose an item.
+     * Whether refusing the last empty hotbar slot is allowed. Server-authoritative like the rest;
+     * unknown means never refuse, which is what vanilla does and the only answer that cannot lose
+     * an item.
+     *
+     * The client's copy is inert as of the inverted whitelist, and deliberately kept. Both callers
+     * are now reachable only on the server - the off-branch repair asks repairsOffBranch, which
+     * requires an EntityPlayerMP, and the refusal itself is behind PIIContext.isGroundPickup, which
+     * is only ever set from an EntityItem or EntityArrow collision. It stays because it is already
+     * on the wire in a shipped protocol, so dropping it is a format change that buys nothing, and
+     * because it keeps the client able to say what policy it is under - which is what makes a
+     * client-side prediction of a future refusal a field edit rather than a protocol bump.
      */
     public static boolean allowsHotbarFallback(EntityPlayer player) {
         if (player == null || player.field_70170_p == null) return true;

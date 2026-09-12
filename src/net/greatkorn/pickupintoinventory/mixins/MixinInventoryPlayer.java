@@ -40,7 +40,7 @@ public abstract class MixinInventoryPlayer {
         at = @At(
             value = "INVOKE",
             target = "Lnet/minecraft/entity/player/InventoryPlayer;func_70447_i()I"))
-    private int pii$preferMainInventory(InventoryPlayer self) {
+    private int pii$preferMainInventory(InventoryPlayer self, ItemStack inserting) {
         final int slot = self.func_70447_i();
         final EntityPlayer owner = self.field_70458_d;
 
@@ -80,20 +80,30 @@ public abstract class MixinInventoryPlayer {
             return main;
         }
 
-        // Refusing the slot leaves the item on the ground - but only for the one caller that still
-        // has it to leave, which is the EntityItem walked into. Everyone else either keeps the item
-        // somewhere of their own choosing, where refusing gains nothing, or throws the answer away,
-        // where it destroys the stack: Container.slotClick's number-key swap has already emptied the
-        // slot it is putting this one back into, and 25 mods in one pack do the same. Asking who may
-        // be refused rather than who must not be is what keeps that list from going stale. See
-        // PIIContext.
-        if (!PIIContext.isGroundPickup()) return slot;
+        // Refusing the slot leaves the item on the ground - but only for the callers that still
+        // have it to leave, which are the EntityItem and the EntityArrow walked into. Everyone else
+        // either keeps the item somewhere of their own choosing, where refusing gains nothing, or
+        // throws the answer away, where it destroys the stack: Container.slotClick's number-key
+        // swap has already emptied the slot it is putting this one back into, and a bare
+        // addItemStackToInventory with no check on the result is a common mod idiom. Asking who may
+        // be refused rather than who must not be is what keeps that list from going stale.
+        //
+        // Against this stack, not against the call being somewhere below a ground pickup: a mod
+        // inserting a second item of its own from inside one would otherwise inherit the mark, and
+        // that caller may be one of the discarding ones. See PIIContext.
+        if (!PIIContext.isGroundPickup(inserting)) return slot;
 
         // In creative, addItemStackToInventory answers -1 by zeroing the stack and reporting
         // success instead of leaving the item on the ground, so refusing here deletes it too - and
         // a ground pickup reaches that branch like any other, which is why this outlives the check
-        // above rather than being covered by it. PlayerCapabilities is assigned while EntityPlayer
-        // is still being constructed, so only the owner itself is worth testing for null.
+        // above rather than being covered by it.
+        //
+        // Capabilities are not null-guarded. There is a window in which they are null -
+        // EntityPlayer's constructor assigns field_71071_by at offset 14 and field_71075_bZ only at
+        // 47 - but vanilla's own func_70441_a dereferences field_70458_d.field_71075_bZ
+        // .field_75098_d unguarded further down the same method, so anything able to reach here
+        // inside that window has already crashed on vanilla's line. A check would be dead code
+        // that reads as though it were load-bearing.
         if (owner != null && owner.field_71075_bZ.field_75098_d) return slot;
 
         // Asked of the policy rather than the local config, though nothing now depends on the
