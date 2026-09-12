@@ -26,7 +26,12 @@ public final class ProtocolHarness {
         theRepairDeliversIt();
         aRepairWithoutItsAnswerLeavesAGhost();
         theAnswerCatchesTheGhost();
-        theCreativeTabFallsBackToAPrefix();
+        theCreativeTabIsRepairedByAPrefix();
+        aPerSlotRepairIsDroppedAndTheMarksAreLost();
+        theWindowZeroSnapshotSurvivesTheSameScreen();
+        aCloseWindowCountsAsAWindowAction();
+        theBarrierGuardSkipsTheIdItJustUsed();
+        theBarrierGuardSkipsAnIdVanillaStillHasOnRecord();
         aSilentClientIsWrittenOff();
         randomised(4500);
 
@@ -104,10 +109,10 @@ public final class ProtocolHarness {
 
     /**
      * A creative player may be on a tab that drops every window-0 slot packet outside the hotbar,
-     * which the server cannot see. The fallback is a window-0 S30 truncated after the highest slot
-     * that needs it, which handleWindowItems always applies.
+     * which the server cannot see. The repair travels as a window-0 S30 truncated after the highest
+     * slot that needs it, which handleWindowItems applies with no test.
      */
-    private static void theCreativeTabFallsBackToAPrefix() {
+    private static void theCreativeTabIsRepairedByAPrefix() {
         final Sim sim = new Sim(2, true, true);
         sim.server.creative = true;
         sim.client.creativeTab = true;
@@ -117,6 +122,134 @@ public final class ProtocolHarness {
 
         check("a client on a creative tab is repaired by the prefix", sim.converged());
         check("the prefix stops before the hotbar", sim.prefixes > 0 && sim.longestPrefix <= 36);
+    }
+
+    /**
+     * The finding behind the switch from per-slot packets to one snapshot. The first draft chose the
+     * channel from the server's own gamemode flag; the flag that decides whether the client applies
+     * a window-0 slot packet is the screen it has open, and a GuiContainerCreative outlives the
+     * creative mode that opened it. With the two disagreeing the server sends an S2F it believes
+     * will land, the client discards it without a word, the barrier behind it is answered out of
+     * inventoryContainer anyway - so the round reports clean and drops the marks for good.
+     */
+    private static void aPerSlotRepairIsDroppedAndTheMarksAreLost() {
+        final Sim sim = droppedRepairScript(true);
+
+        check("a per-slot repair the client silently drops never arrives", !sim.converged());
+        check("and the round that lost it reported clean, so nothing is left to retry",
+            sim.settledWithNothingOutstanding());
+    }
+
+    /** The same script on the channel the client cannot decline. */
+    private static void theWindowZeroSnapshotSurvivesTheSameScreen() {
+        final Sim sim = droppedRepairScript(false);
+
+        check("the window-0 snapshot reaches the same client", sim.converged());
+    }
+
+    /**
+     * A survival-mode server and a client still sitting on a creative tab, running the same script
+     * as the very first scenario: a click and a pickup in one tick, so vanilla's own sync is
+     * suppressed and the repair is the only thing that can carry slot 9.
+     */
+    private static Sim droppedRepairScript(boolean perSlot) {
+        final Sim sim = new Sim(3, true, true);
+        sim.server.perSlot = perSlot;
+        sim.server.creative = false;  // the server sees an ordinary survival player
+        sim.client.creativeTab = true; // the screen the mode was left in is still up
+
+        sim.server.seed(5, stack(1, 1), sim.client); // hotbar, which the tab does not drop
+        sim.client.click(5, sim.now);
+        sim.run(8, new Step() { public void run(Sim s) { if (s.now == 3) s.server.pickup(stack(7, 1)); } });
+        sim.quiet();
+        return sim;
+    }
+
+    /**
+     * C0DPacketCloseWindow is counted exactly as a click is, so a repair that crosses one is judged
+     * dirty and redone rather than written off. Nothing else in the suite sends one.
+     */
+    private static void aCloseWindowCountsAsAWindowAction() {
+        final int latency = 4;
+        final Sim sim = new Sim(latency, true, true);
+
+        sim.run(1, new Step() { public void run(Sim s) { if (s.now == 0) s.server.pickup(stack(9, 1)); } });
+        // The close leaves while the repair and its barrier are in flight, so it reaches the server
+        // between the repair and the echo: the answer carries a different action count than the
+        // repair did.
+        sim.run(latency + 2, new Step() {
+            public void run(Sim s) { if (s.now == latency + 1) s.client.closeWindow(s.now); }
+        });
+        sim.quiet();
+
+        check("a close is seen as a window action", sim.server.closes() == 1);
+        check("a round the close crossed is redone rather than trusted", sim.server.rounds >= 2);
+        check("and the inventory still converges", sim.converged());
+    }
+
+    /**
+     * The barrier counter moves one step per round, so the id it last used is 65536 rounds behind
+     * it and no scenario of a plausible length reaches the guard by playing fairly. Placing the
+     * counter next to the collision is the same arithmetic the wrap would have produced, without
+     * the 65536 rounds.
+     */
+    private static void theBarrierGuardSkipsTheIdItJustUsed() {
+        final Sim sim = new Sim(2, true, true);
+
+        sim.run(2, new Step() { public void run(Sim s) { if (s.now == 0) s.server.pickup(stack(9, 1)); } });
+        sim.quiet();
+        final short used = sim.server.barrier();
+
+        // Wind the counter back so the next id it hands out is the one the last round used.
+        sim.server.seedBarrierSeq((short) (used - 1));
+        sim.server.pickup(stack(9, 2));
+        sim.quiet();
+
+        check("the previous round's id is the one the counter would have offered",
+            sim.server.previousBarrier() == used);
+        check("and the barrier guard passed over it", sim.server.barrier() != used);
+        check("the inventory converges across the skip", sim.converged());
+    }
+
+    /**
+     * The other arm of the guard, and the reason it is not spelled `awaiting`: func_147339_a
+     * re-enables crafting and leaves the field_147372_n entry in place, so the id vanilla rejected
+     * a click with stays on record for the rest of the session. What a barrier reusing that id
+     * costs is not a wasted round - it is vanilla's echo. Our handler takes the first echo of a
+     * shared id and returns, so vanilla never hears the answer it is holding the click block for,
+     * and the block never lifts.
+     */
+    private static void theBarrierGuardSkipsAnIdVanillaStillHasOnRecord() {
+        final int latency = 6;
+        final Sim sim = new Sim(latency, true, true);
+        sim.server.seed(5, stack(1, 1), sim.client);
+
+        sim.run(1, new Step() {
+            public void run(Sim s) {
+                if (s.now != 0) return;
+                s.client.click(5, s.now);       // predicts a swap
+                s.server.inv[5] = stack(2, 1);  // against something the server does not have
+            }
+        });
+
+        // tick 6: the click lands, vanilla rejects it, records the id and blocks. Nothing of ours
+        // is outstanding yet, so the rejection is entirely vanilla's.
+        sim.run(latency + 1, NOTHING);
+        final short recorded = sim.server.vanillaUid();
+        check("vanilla rejected the click, recorded an id and blocked",
+            sim.server.vanillaHasUid() && sim.server.blocked());
+
+        // tick 7: a pickup to repair, with the counter wound so the id it would offer is vanilla's.
+        // The round runs on tick 8 and vanilla's echo does not arrive until tick 12, so the two are
+        // genuinely in flight together.
+        sim.server.seedBarrierSeq((short) (recorded - 1));
+        sim.server.pickup(stack(9, 1));
+        sim.quiet();
+
+        check("a barrier does not reuse an id vanilla still has on record",
+            sim.server.barrier() != recorded && sim.server.previousBarrier() != recorded);
+        check("so vanilla's own echo reaches it and the click block lifts", !sim.server.blocked());
+        check("the inventory converges across that skip too", sim.converged());
     }
 
     /** A client that answers nothing must not draw packets for ever. */
@@ -133,9 +266,18 @@ public final class ProtocolHarness {
 
     // ------------------------------------------------------------------ randomised
 
+    /**
+     * The driver does not click while vanilla's block is up. That is not the model papering over a
+     * case: a click that arrives while getCanCraft is false is dropped by func_147351_a where it
+     * stands - no echo, no rejection, no resend - so the client keeps a prediction the server never
+     * made and the two stay apart until something else writes that slot. It is a vanilla desync,
+     * present with the mod uninstalled, and the convergence figure below is about the repair. The
+     * block itself is still exercised: rejections happen, ids are recorded, echoes release it.
+     */
     private static void randomised(int trials) {
         final Random rnd = new Random(20260912L);
         int worstRounds = 0;
+        int closes = 0;
         for (int t = 0; t < trials; t++) {
             final int latency = 1 + rnd.nextInt(20);
             final boolean packetsFirst = rnd.nextBoolean();
@@ -143,11 +285,14 @@ public final class ProtocolHarness {
             final int ticks = 20 + rnd.nextInt(100);
             final int clickChance = 1 + rnd.nextInt(60);   // percent, per tick
             final int pickupChance = 1 + rnd.nextInt(40);
+            final int closeChance = rnd.nextInt(6);
 
             final Sim sim = new Sim(latency, true, true);
             sim.packetsFirst = packetsFirst;
             sim.server.creative = creative;
-            sim.client.creativeTab = creative && rnd.nextBoolean();
+            // Drawn independently of the gamemode, because the screen and the mode come apart: a
+            // GuiContainerCreative stays up after /gamemode 0, and the server cannot see either.
+            sim.client.creativeTab = rnd.nextInt(4) == 0;
 
             // Start with a few stacks already in place so clicks have something to move and the
             // server has something to reject against.
@@ -164,7 +309,10 @@ public final class ProtocolHarness {
                             s.server.merge(Model.MAIN_FIRST + inner.nextInt(27));
                         }
                     }
-                    if (inner.nextInt(100) < clickChance) s.client.click(inner.nextInt(36), s.now);
+                    if (!s.server.blocked() && inner.nextInt(100) < clickChance) {
+                        s.client.click(inner.nextInt(36), s.now);
+                    }
+                    if (inner.nextInt(100) < closeChance) s.client.closeWindow(s.now);
                 }
             });
             sim.quiet();
@@ -180,9 +328,11 @@ public final class ProtocolHarness {
                 return;
             }
             if (sim.server.rounds > worstRounds) worstRounds = sim.server.rounds;
+            closes += sim.server.closes();
         }
         check(trials + " randomised interleavings converged, 1-20 tick latency (worst "
             + worstRounds + " repair rounds in one trial)", true);
+        check("the close path was actually walked (" + closes + " window closes)", closes > 0);
     }
 
     // ------------------------------------------------------------------ plumbing
@@ -244,6 +394,11 @@ public final class ProtocolHarness {
                 }
                 client.receive(p, now);
             }
+        }
+
+        /** Nothing in flight, no round open, and no slot still marked for a retry. */
+        boolean settledWithNothingOutstanding() {
+            return up.idle() && down.idle() && server.settled();
         }
 
         boolean converged() {

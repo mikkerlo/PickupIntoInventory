@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
@@ -13,7 +14,6 @@ import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.inventory.Container;
 import net.minecraft.inventory.Slot;
 import net.minecraft.item.ItemStack;
-import net.minecraft.network.play.server.S2FPacketSetSlot;
 import net.minecraft.network.play.server.S30PacketWindowItems;
 import net.minecraft.network.play.server.S32PacketConfirmTransaction;
 
@@ -46,17 +46,26 @@ import cpw.mods.fml.relauncher.Side;
  * exactly like a fresh placement. Hotbar indices 0-8 are deliberately left out: those the client
  * applies unconditionally, and during a click it has already predicted them itself.
  *
- * A changed slot is sent as a single S2FPacketSetSlot addressed through the container the player
- * actually has open (Container.getSlotFromInventory maps the inventory index to that container's
- * slot number), because a window whose id matches is applied client-side without further
- * conditions. Where handleSetSlot would drop the packet - a creative player, who may be on a tab
- * that gates window-0 updates, or an open container that does not show the player's inventory at
- * all - the fallback is a window-0 S30PacketWindowItems, which handleWindowItems always applies.
- * That packet is truncated after the highest slot that needs it: putStacksInSlots walks the array
+ * The marks are carried by one window-0 S30PacketWindowItems. handleWindowItems applies a window-0
+ * packet to inventoryContainer with no test at all - not the windowId comparison, not the
+ * creative-tab one - and that is the whole reason it is the channel: for slots 9-35 it is the only
+ * address whose delivery the server can reason about without knowing what is on screen.
+ *
+ * A per-slot S2FPacketSetSlot would be smaller, and this did send one, but every address it can
+ * carry is conditional at the far end. A non-zero window is compared against the client's own
+ * openContainer, which a GUI the player has just closed no longer is. Window 0 is dropped for
+ * slots 9-35 while a GuiContainerCreative sits on a tab other than the survival inventory - a
+ * screen the server cannot see at all, and which outlives the creative mode that opened it, so
+ * reading capabilities does not rule it out either. Neither drop is visible from this side, and
+ * the confirmation described below comes back regardless: handleConfirmTransaction answers a
+ * window-0 barrier out of inventoryContainer whatever is on screen. The round would then report
+ * clean and discard its marks for good, which is the one outcome this class must not produce.
+ *
+ * The packet is truncated after the highest slot that needs it: putStacksInSlots walks the array
  * it is given, so a 36-entry prefix repairs slots 0-35 and leaves the hotbar the player is most
  * likely to be clicking untouched. The cursor is never sent, so a drag in progress is safe.
  *
- * A prefix cannot start anywhere but zero, so that fallback also rewrites the crafting slots and
+ * A prefix cannot start anywhere but zero, so it also rewrites the crafting slots and
  * the armour, which no pickup ever touches and which nothing here marks. Overwriting a prediction
  * there is not silent, though: making one takes a click, a click moves the counter below, and the
  * round that follows sends the same prefix again with the server's contents for those slots.
@@ -103,17 +112,23 @@ public final class PIISync {
     /** Indices 0-8 are the hotbar: guaranteed delivery already, and predicted during a click. */
     private static final int MAIN_FIRST = 9;
 
-    /** Where the hotbar sits in inventoryContainer's slot numbering, which is not the same order. */
-    private static final int HOTBAR_SLOT_FIRST = 36;
-    private static final int HOTBAR_SLOT_END = 45;
-
     /** Ticks to wait for the confirmation before assuming it is not coming. */
     private static final int ANSWER_TIMEOUT = 100;
 
     /** Unanswered rounds to repeat before concluding this client will never answer at all. */
     private static final int ANSWER_ATTEMPTS = 3;
 
-    private static final int NO_ANSWER = -1;
+    /**
+     * The answer to an outstanding round, packed into one long so that the claim on the round and
+     * the evidence for it are published together - an echo arriving while another is being recorded
+     * has to take the round whole or leave it entirely alone.
+     *
+     * Low 32 bits are the window-action count at the moment the echo arrived; bit 32 says vanilla
+     * was waiting on the same id. NO_ANSWER sits above both, so no real answer can be mistaken for
+     * it however far the counter has wrapped.
+     */
+    private static final long NO_ANSWER = 1L << 33;
+    private static final long ANSWER_SHARED = 1L << 32;
 
     private static final Map<UUID, Pending> PENDING = new ConcurrentHashMap<UUID, Pending>();
 
@@ -199,10 +214,9 @@ public final class PIISync {
         int actionsLastTick = -1;
         int actionsAtRepair;
 
-        volatile int actionsAtAnswer = NO_ANSWER;
-        volatile boolean answerShared;
+        final AtomicLong answer = new AtomicLong(NO_ANSWER);
 
-        // Read on the same path as actionsAtAnswer, so they carry the same defence: a mod that
+        // Read on the same path as the answer, so they carry the same defence: a mod that
         // dispatches packets early would otherwise publish these two unsafely while the field
         // beside them is protected, which is the worst of both.
         volatile short barrier;
@@ -211,8 +225,16 @@ public final class PIISync {
         /** The id the round before this one used, kept only so the next round can avoid it. */
         short lastBarrier;
 
-        /** Counted per player rather than per process, so one player cannot walk another's ids. */
-        short barrierSeq;
+        /**
+         * Counted per player rather than per process, so one player cannot walk another's ids.
+         *
+         * Started at the far end of the range because the ids we have to keep clear of are not a
+         * server counter: processClickWindow echoes back the action number the *client* chose, and
+         * that is Container.getNextTransactionID on the client's own container instance, which
+         * starts at 1. Beginning at 1 here too would lay our first rounds directly over their first
+         * clicks. taken() would catch it, but half a short of distance is cheaper than catching it.
+         */
+        short barrierSeq = Short.MIN_VALUE;
 
         int waited;
         int unanswered;
@@ -387,10 +409,16 @@ public final class PIISync {
         if (player == null || windowId != 0) return false;
         final Pending pending = PENDING.get(player.func_110124_au());
         if (pending == null || !pending.awaitingAnswer || uid != pending.barrier) return false;
-        if (pending.actionsAtAnswer != NO_ANSWER) return false; // ours was taken already
-        pending.answerShared = shared;
-        pending.actionsAtAnswer = pending.actions.get();
-        return true;
+        final long taken = (shared ? ANSWER_SHARED : 0L) | (pending.actions.get() & 0xFFFFFFFFL);
+        // One compareAndSet rather than a test and then a set. Two echoes of one id reach here in
+        // sequence today - C0FPacketConfirmTransaction does not override Packet.hasPriority, so
+        // NetworkManager queues it and only networkTick drains it, on the server thread - and the
+        // second of the two is vanilla's. The comment on those volatile fields above claims a
+        // defence against a mod that dispatches packets early, and in that world a test-then-set
+        // hands both callers a true and cancels vanilla's echo as well as ours, which blocks that
+        // player's ContainerPlayer for good. Either the defence covers that or it should not be
+        // claimed; this is the cheaper of the two.
+        return pending.answer.compareAndSet(NO_ANSWER, taken);
     }
 
     public static void register() {
@@ -453,8 +481,7 @@ public final class PIISync {
             repair(player, pending);
             pending.lastBarrier = pending.barrier;
             pending.barrier = nextBarrier(player, pending);
-            pending.actionsAtAnswer = NO_ANSWER;
-            pending.answerShared = false;
+            pending.answer.set(NO_ANSWER);
             pending.awaitingAnswer = true;
             pending.waited = 0;
             player.field_71135_a.func_147359_a(
@@ -501,17 +528,18 @@ public final class PIISync {
      * @return false while the outstanding round is still unresolved and nothing else should happen.
      */
     private static boolean settle(Pending pending) {
-        final int answered = pending.actionsAtAnswer;
-        if (answered == NO_ANSWER) {
+        final long answer = pending.answer.get();
+        if (answer == NO_ANSWER) {
             if (++pending.waited <= ANSWER_TIMEOUT) return false;
             // Silence is not proof the repair landed, and treating it as proof throws away exactly
             // the slot this exists to fix - a client stalled past five seconds by a chunk-gen hitch
             // or a collection pause would keep the stale stack for good. So the marks come back and
-            // the repair goes again. Only a client that answers nothing at all, several rounds
-            // running, is written off, so a client that cannot answer does not draw packets forever.
+            // the repair goes again, up to ANSWER_ATTEMPTS times, and then the round is written off
+            // and its marks dropped. That bounds a mute client per round, not per session: it can
+            // still draw three rounds and five seconds of waiting out of every fresh pickup.
             if (++pending.unanswered >= ANSWER_ATTEMPTS) pending.dropRepair();
             else pending.restoreRepair();
-        } else if (answered == pending.actionsAtRepair && !pending.answerShared) {
+        } else if ((int) answer == pending.actionsAtRepair && (answer & ANSWER_SHARED) == 0) {
             // The client had nothing of its own outstanding while the repair was applied, so what
             // it now shows for those slots is what the server sent.
             pending.unanswered = 0;
@@ -521,49 +549,30 @@ public final class PIISync {
             pending.restoreRepair();
         }
         pending.awaitingAnswer = false;
-        pending.actionsAtAnswer = NO_ANSWER;
+        pending.answer.set(NO_ANSWER);
         return true;
     }
 
     private static void repair(EntityPlayerMP player, Pending pending) {
         final InventoryPlayer inventory = player.field_71071_by;
-        final Container open = player.field_71070_bA; // openContainer
         final Container own = player.field_71069_bz; // inventoryContainer
-        final int window = open.field_75152_c; // windowId
-        final boolean creative = player.field_71075_bZ != null && player.field_71075_bZ.field_75098_d;
 
+        // Addressed and numbered through inventoryContainer rather than through whatever the
+        // player has open, because that is the container the client applies a window-0
+        // S30PacketWindowItems to, unconditionally. An open container shows the same
+        // InventoryPlayer through slots of its own, so writing it there updates what is on screen
+        // too; nothing is gained by naming that window, and the far end's test is the loss.
         int snapshotUpTo = -1;
         for (int i = MAIN_FIRST; i < MAIN_END; i++) {
             if (!pending.sent[i]) continue;
-
-            final Slot shown = open.func_75147_a(inventory, i); // getSlotFromInventory
-            if (shown != null && applied(window, shown.field_75222_d, creative)) {
-                player.field_71135_a.func_147359_a(
-                    new S2FPacketSetSlot(window, shown.field_75222_d, shown.func_75211_c()));
-                continue;
-            }
-            final Slot ownSlot = own.func_75147_a(inventory, i);
-            if (ownSlot == null) continue; // nothing on the client is showing this slot
-            if (ownSlot.field_75222_d > snapshotUpTo) snapshotUpTo = ownSlot.field_75222_d;
+            final Slot slot = own.func_75147_a(inventory, i); // getSlotFromInventory
+            if (slot == null) continue; // no slot is showing this index; nothing to repair through
+            if (slot.field_75222_d > snapshotUpTo) snapshotUpTo = slot.field_75222_d;
         }
 
         if (snapshotUpTo < 0) return;
         final List<?> stacks = own.func_75138_a(); // getInventory
         player.field_71135_a.func_147359_a(
             new S30PacketWindowItems(0, stacks.subList(0, Math.min(snapshotUpTo + 1, stacks.size()))));
-    }
-
-    /** Whether handleSetSlot is certain to apply a slot packet, rather than dropping it. */
-    private static boolean applied(int window, int slotNumber, boolean creative) {
-        // A matching non-zero window is applied to the open container with no further test, and
-        // the ids match: the server is the one that handed this window out.
-        if (window != 0) return true;
-        // Window 0 slots 36-44 go to inventoryContainer whatever the client has on screen.
-        if (slotNumber >= HOTBAR_SLOT_FIRST && slotNumber < HOTBAR_SLOT_END) return true;
-        // The remaining window-0 slots are dropped while a creative non-inventory tab is open. The
-        // server cannot see which tab that is, only that opening the screen at all takes creative
-        // mode - which it can see, bar the corner where a player is taken out of creative with the
-        // screen still up, and there the snapshot is simply not sent.
-        return !creative;
     }
 }

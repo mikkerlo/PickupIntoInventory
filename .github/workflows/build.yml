@@ -20,6 +20,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # No Minecraft and no dependencies: the protocol model is plain Java, so it runs before
+      # anything is fetched and fails fast if the reasoning behind PIISync has been broken.
+      - name: Protocol model
+        run: tools/protocol/run.sh
+
       # Both caches are keyed on ci/fetch-deps.sh, which holds the pinned versions and
       # SHA-1s; bumping a dependency there invalidates the downloads and the remap together.
       - name: Cache dependency jars
