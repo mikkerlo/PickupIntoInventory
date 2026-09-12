@@ -75,11 +75,14 @@ that made it, so a burst of changes costs one write instead of one write each an
 them can hold the server up; a request for the setting you are already on is not a change and
 writes nothing at all. The cost of moving the write off the tick is a window: a change made in the
 second or so before the machine loses power, or before the process is killed outright, is not on
-disk and is gone. A change made before an orderly stop is not — the world's stop waits for any
-writing still outstanding, including a write that failed earlier and is being retried. The file is
-replaced atomically, so a write interrupted part way through leaves the previous one whole rather
-than an empty stub. An admin can set `allowPlayerOverride=false` to take the choice
-away and pin everyone to the server's `enabled`; choices are kept but ignored while that is on,
+disk and is gone. A change made before an orderly stop usually is not lost — the world's stop
+writes out whatever is still outstanding, a write that failed earlier included, on its own thread
+rather than hoping the background one gets there. That last attempt can fail too, and it gives up
+rather than hold the shutdown open: if the disk is full or another process has the file, or if a
+write already in flight has not returned within five seconds, the stop logs that and lets the
+server finish. The file is replaced atomically, so a write interrupted part way through leaves the
+previous one whole rather than an empty stub. An admin can set `allowPlayerOverride=false` to
+take the choice away and pin everyone to the server's `enabled`; choices are kept but ignored while that is on,
 and both the command and the keybind say so instead of pretending the request landed.
 
 ## Sides

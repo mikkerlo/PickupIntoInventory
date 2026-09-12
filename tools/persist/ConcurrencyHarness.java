@@ -3,6 +3,7 @@ import java.lang.reflect.Field;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 import net.greatkorn.pickupintoinventory.PIIState;
 import net.greatkorn.pickupintoinventory.PIIState.Choice;
@@ -11,6 +12,12 @@ import net.greatkorn.pickupintoinventory.PIIState.Choice;
  * The claim under test is finding #7's actual requirement: a preference change made on the main
  * server thread must never wait on disk I/O. Reflection is used only to hold the mod's own save
  * lock from outside, which is how an in-flight write is simulated without a slow disk.
+ *
+ * SAVE_LOCK is a ReentrantLock and is taken with lock(), not with synchronized. Taking its
+ * intrinsic monitor instead contends with nothing PIIState does, so the assertion below would
+ * hold no matter what set() did with the lock - which is what it did until this was fixed.
+ * Mutating set() to take and release SAVE_LOCK is the regression it exists to catch, and that
+ * mutation must hang here rather than pass.
  */
 public final class ConcurrencyHarness {
 
@@ -34,15 +41,18 @@ public final class ConcurrencyHarness {
     private static void setNeverBlocksOnAWriteInFlight() throws Exception {
         Field lockField = PIIState.class.getDeclaredField("SAVE_LOCK");
         lockField.setAccessible(true);
-        final Object saveLock = lockField.get(null);
+        final ReentrantLock saveLock = (ReentrantLock) lockField.get(null);
 
         final CountDownLatch held = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         Thread writer = new Thread(new Runnable() {
             public void run() {
-                synchronized (saveLock) {
+                saveLock.lock();
+                try {
                     held.countDown();
                     try { release.await(); } catch (InterruptedException ignored) {}
+                } finally {
+                    saveLock.unlock();
                 }
             }
         });
