@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download the five jars build.sh needs, from their public homes, and verify them by SHA-1.
+# Download the six jars build.sh needs, from their public homes, and verify them by SHA-1.
 # Writes them into a deps dir and drops an env.sh next to them with the exports build.sh reads.
 #
 #   ci/fetch-deps.sh [dest-dir]        # default: build/deps
@@ -56,11 +56,19 @@ fetch netty-all-4.0.10.Final.jar \
     "https://repo1.maven.org/maven2/io/netty/netty-all/4.0.10.Final/netty-all-4.0.10.Final.jar" \
     9e50bd52ffe257a0e2cd8d971688d6ce7d174325
 
+# FMLLog takes a log4j Level, so the type has to be on the compile classpath even though
+# nothing here runs it. Forge's universal jar does not carry log4j; the launcher supplies it,
+# and this is the copy the 1.7.10 launch manifest names.
+fetch log4j-api-2.0-beta9.jar \
+    "https://libraries.minecraft.net/org/apache/logging/log4j/log4j-api/2.0-beta9/log4j-api-2.0-beta9.jar" \
+    1dd66e68cccd907880229f9e2de1314bd13ff785
+
 cat > "$DEST/env.sh" <<ENV
 export MC="$DEST/minecraft-1.7.10-client.jar"
 export FORGE="$DEST/forge-1.7.10-10.13.4.1614-universal.jar"
 export UNIMIXINS="$DEST/unimixins-all-1.7.10-0.3.1.jar"
 export FPL="$DEST/falsepatternlib-mc1.7.10-1.12.2.jar"
 export NETTY="$DEST/netty-all-4.0.10.Final.jar"
+export LOG4J="$DEST/log4j-api-2.0-beta9.jar"
 ENV
 echo "wrote $DEST/env.sh"
