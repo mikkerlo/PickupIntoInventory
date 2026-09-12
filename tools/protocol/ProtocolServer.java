@@ -4,9 +4,12 @@ import java.util.Arrays;
  * The server half: vanilla's own container sync, vanilla's click handling and transaction block,
  * and a transcription of PIISync's per-player round.
  *
- * The two feature switches are what make the regressions reproducible. repair=false is the
+ * The three feature switches are what make the regressions reproducible. repair=false is the
  * behaviour before #4: vanilla sync only. confirm=false is the repair without the round trip
  * behind it, which is where a repair can overwrite a prediction and never learn that it did.
+ * perSlot=true is the first draft of the repair, which addressed each marked slot with its own
+ * S2FPacketSetSlot and only fell back to a prefix when the server could see a reason the client
+ * would drop it - a reason the server cannot always see.
  */
 final class ServerModel {
 
@@ -28,14 +31,25 @@ final class ServerModel {
 
     final boolean repair;
     final boolean confirm;
+    boolean perSlot;
 
     private final Link toClient;
 
     // ------------------------------------------------------------ vanilla transaction state
 
     private short vanillaSeq;
+
+    /**
+     * NetHandlerPlayServer.field_147372_n, the per-window id vanilla rejected a click with. It is
+     * written on a rejection and read by func_147339_a, which re-enables crafting and leaves the
+     * entry where it is - so once a click has been rejected the entry stays for the rest of the
+     * session. That is why this is two fields and not one: hasUid is the map entry, clickBlocked is
+     * Container.getCanCraft, and pii$awaits reads the former. The guard therefore keeps refusing
+     * that id long after the block it belonged to lifted, which costs nothing and is not something
+     * the suite can assert from outside: with the guard in place no barrier ever reaches it.
+     */
     private short vanillaUid;
-    private boolean vanillaAwaiting;
+    private boolean vanillaHasUid;
     private boolean clickBlocked;
 
     // ------------------------------------------------------------ PIISync.Pending
@@ -45,6 +59,7 @@ final class ServerModel {
     private int staleCount;
     private final boolean[] sent = new boolean[Model.MAIN_END];
     private int actions;
+    private int closes;
     private int actionsLastTick = -1;
     private int actionsAtRepair;
     private int actionsAtAnswer = NO_ANSWER;
@@ -52,7 +67,12 @@ final class ServerModel {
     private short barrier;
     private boolean awaitingAnswer;
     private short lastBarrier;
-    private short barrierSeq;
+
+    /**
+     * Starts where PIISync's does. Vanilla's ids are Container.func_75136_a on the client, counting
+     * up from 1 per container, so the far end of the range is the cheapest place to be.
+     */
+    private short barrierSeq = Short.MIN_VALUE;
     private int waited;
     private int unanswered;
 
@@ -106,21 +126,40 @@ final class ServerModel {
         switch (p.kind) {
             case Pkt.C0E: click(p, now); return;
             case Pkt.C0F: confirmAck(p); return;
+            case Pkt.C0D: close(); return;
             default: throw new IllegalStateException("client received its own packet kind");
         }
     }
 
+    /**
+     * C0DPacketCloseWindow. pii$noteClose counts it exactly as it counts a click, and nothing else
+     * here cares: the window the client is leaving was never the one a repair is addressed to.
+     */
+    private void close() {
+        if (hasPending) actions++;
+        closes++;
+    }
+
     private void click(Pkt p, int now) {
-        if (hasPending) actions++; // PIISync.noteWindowAction, which drops what has no record
+        if (hasPending) actions++; // PIISync.noteWindowAction, at HEAD, before any of vanilla's tests
 
         final int index = Model.inventoryIndex(p.slot);
         if (index < 0) return;
 
-        if (clickBlocked || inv[index] != p.expect) {
+        if (clickBlocked) {
+            // func_147351_a guards its whole body on getCanCraft. A click that arrives while the
+            // block is up is dropped where it stands: no echo, no rejection, no resend. The client
+            // has already predicted the swap locally and will never hear that it did not happen,
+            // which is a vanilla desync the repair neither causes nor claims to fix - see the note
+            // on the driver in ProtocolHarness.
+            return;
+        }
+
+        if (inv[index] != p.expect) {
             // Vanilla rejects: block further clicking until the echo comes back, tell the client
             // no, and resend the whole container and the cursor.
             vanillaUid = ++vanillaSeq;
-            vanillaAwaiting = true;
+            vanillaHasUid = true;
             clickBlocked = true;
             toClient.send(Pkt.confirm(Pkt.S32, 0, vanillaUid, false), now);
             toClient.send(Pkt.windowItems(0, contents(Model.SLOTS)), now);
@@ -141,17 +180,21 @@ final class ServerModel {
     }
 
     private void confirmAck(Pkt p) {
-        final boolean shared = vanillaAwaiting && p.uid == vanillaUid;
+        // pii$awaits reads the map, which outlives the block - so an echo can be "shared" by id
+        // while nothing is actually waiting on it. That is the conservative direction: the repair
+        // treats the answer as possibly vanilla's and redoes the round.
+        final boolean shared = vanillaHasUid && p.uid == vanillaUid;
         if (confirm && noteTransactionAck(p.window, p.uid, shared)) return; // ours; vanilla never sees it
-        if (shared) {
-            vanillaAwaiting = false;
-            clickBlocked = false;
-        }
+        if (shared) clickBlocked = false; // func_147339_a re-enables crafting and leaves the entry
     }
 
     private boolean noteTransactionAck(int windowId, short uid, boolean shared) {
         if (windowId != 0) return false;
         if (!hasPending || !awaitingAnswer || uid != barrier) return false;
+        // PIISync does this as one compareAndSet on an AtomicLong carrying both fields, because
+        // there the two echoes of a shared id arrive on the same thread but the write is read from
+        // another. Here there is one thread and one queue, so the test and the set are the same
+        // thing; what is being modelled is which echo wins, and that is the first.
         if (actionsAtAnswer != NO_ANSWER) return false;
         answerShared = shared;
         actionsAtAnswer = actions;
@@ -227,7 +270,7 @@ final class ServerModel {
 
     private boolean taken(short id) {
         if (id == lastBarrier) return true;
-        return vanillaAwaiting && id == vanillaUid;
+        return vanillaHasUid && id == vanillaUid;
     }
 
     private void beginRepair() {
@@ -247,12 +290,39 @@ final class ServerModel {
 
     private void dropRepair() { Arrays.fill(sent, false); }
 
+    /**
+     * One window-0 S30 truncated after the highest marked slot. handleWindowItems applies a window-0
+     * packet to inventoryContainer with no test at all, so this is the one address whose delivery
+     * the server can reason about without knowing what is on screen.
+     */
     private void sendRepair(int now) {
+        if (perSlot) { sendRepairPerSlot(now); return; }
+
         int snapshotUpTo = -1;
         for (int i = Model.MAIN_FIRST; i < Model.MAIN_END; i++) {
             if (!sent[i]) continue;
             final int slotNumber = Model.slotNumber(i);
-            if (applied(0, slotNumber, creative)) {
+            if (slotNumber > snapshotUpTo) snapshotUpTo = slotNumber;
+        }
+        if (snapshotUpTo < 0) return;
+        toClient.send(Pkt.windowItems(0, contents(snapshotUpTo + 1)), now);
+    }
+
+    /**
+     * The first draft: a per-slot S2F wherever the server believed the client would apply it, and a
+     * prefix only for the slots it believed would be dropped. The belief is the bug. `creative` is
+     * the server's own gamemode flag; the flag that decides the drop is the client's open screen,
+     * which a GuiContainerCreative outlives its gamemode by, and which the server cannot see. When
+     * the two disagree this sends an S2F the client silently discards, the barrier behind it is
+     * answered out of inventoryContainer regardless, the round reports clean, and dropRepair throws
+     * the marks away for good.
+     */
+    private void sendRepairPerSlot(int now) {
+        int snapshotUpTo = -1;
+        for (int i = Model.MAIN_FIRST; i < Model.MAIN_END; i++) {
+            if (!sent[i]) continue;
+            final int slotNumber = Model.slotNumber(i);
+            if (!creative) {
                 toClient.send(Pkt.setSlot(0, slotNumber, inv[i]), now);
                 continue;
             }
@@ -260,12 +330,6 @@ final class ServerModel {
         }
         if (snapshotUpTo < 0) return;
         toClient.send(Pkt.windowItems(0, contents(snapshotUpTo + 1)), now);
-    }
-
-    private static boolean applied(int window, int slotNumber, boolean creative) {
-        if (window != 0) return true;
-        if (slotNumber >= 36 && slotNumber < 45) return true;
-        return !creative;
     }
 
     private int[] contents(int upTo) {
@@ -283,4 +347,23 @@ final class ServerModel {
 
     /** Whether vanilla is still holding this player's own container shut, waiting for an echo. */
     boolean blocked() { return clickBlocked; }
+
+    int closes() { return closes; }
+
+    // ------------------------------------------------------------------ test hooks
+    //
+    // The barrier counter is 16 bits and moves one step per round, so the id it collides with is
+    // 65536 rounds away - far enough that no scenario of a plausible length reaches the guard by
+    // playing fairly. These place the counter next to a collision directly, which is the same
+    // arithmetic the wrap would have produced.
+
+    void seedBarrierSeq(short value) { barrierSeq = value; }
+
+    short barrier() { return barrier; }
+
+    short previousBarrier() { return lastBarrier; }
+
+    short vanillaUid() { return vanillaUid; }
+
+    boolean vanillaHasUid() { return vanillaHasUid; }
 }

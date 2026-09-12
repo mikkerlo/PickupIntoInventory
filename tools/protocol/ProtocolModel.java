@@ -23,6 +23,13 @@ import java.util.List;
  * Slot numbering follows ContainerPlayer: container slots 0-8 are the crafting grid and armour
  * (not modelled, always empty), 9-35 are main inventory indices 9-35, and 36-44 are the hotbar,
  * inventory indices 0-8. That is the mapping the S30 prefix argument depends on.
+ *
+ * Every packet here is addressed to window 0, which is not a simplification on the repair's side:
+ * the repair only ever names window 0, and the client applies a window-0 S30 to inventoryContainer
+ * with no test. It is a simplification on vanilla's side - a chest's own sync traffic is not
+ * modelled - and that traffic can only write slots this never claims to own. What a container being
+ * open does reach is the counter: closing one is a client action like a click, so ClientModel can
+ * send a C0D and the driver does.
  */
 final class Pkt {
 
@@ -31,6 +38,7 @@ final class Pkt {
     static final int S32 = 2; // ConfirmTransaction, server -> client
     static final int C0E = 3; // ClickWindow, client -> server
     static final int C0F = 4; // ConfirmTransaction, client -> server
+    static final int C0D = 5; // CloseWindow, client -> server
 
     final int kind;
     int window;
@@ -58,6 +66,8 @@ final class Pkt {
         p.prefix = prefix;
         return p;
     }
+
+    static Pkt closeWindow() { return new Pkt(C0D); }
 
     static Pkt confirm(int kind, int window, short uid, boolean accepted) {
         final Pkt p = new Pkt(kind);
@@ -132,12 +142,23 @@ final class ClientModel {
         }
     }
 
-    /** Whether handleSetSlot applies rather than drops. */
+    /**
+     * Whether handleSetSlot applies rather than drops, straight off the disassembly: window 0 and
+     * slots 36-44 go to inventoryContainer with no further test at all, anything else has to match
+     * openContainer's id and, on window 0, survive the creative-tab flag. Nothing here sends a
+     * non-zero window, so that arm stands only to say what the rule is.
+     */
     private boolean applies(int window, int slotNumber) {
         if (window != 0) return true;
         if (slotNumber >= 36 && slotNumber < 45) return true;
         return !creativeTab;
     }
+
+    /**
+     * Escape out of a container screen. The server hears C0D and counts it, which is the whole of
+     * what a close means to the repair: the client did something to a window of its own accord.
+     */
+    void closeWindow(int now) { toServer.send(Pkt.closeWindow(), now); }
 
     /** Predicts the swap locally and tells the server what it thought was there. */
     void click(int index, int now) {
