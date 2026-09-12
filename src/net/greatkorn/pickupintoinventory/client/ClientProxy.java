@@ -49,6 +49,20 @@ public class ClientProxy extends CommonProxy {
      */
     private int login;
 
+    /**
+     * What this client last asked for while the server has said nothing back, or null.
+     *
+     * A server running 1.3.0 has the mod and reads a preference out of this client's message
+     * perfectly well - the two booleans are where 1.3.0 left them and the mode byte rides behind
+     * them - it simply has no way to say so, so clientKnows() is false there all session. Refusing
+     * to send anything in that case took a working toggle away from a server where it had worked,
+     * and told the player the mod was not running when it was.
+     *
+     * There is nothing to toggle from in that state: no answer, and the local file is deliberately
+     * not written by a keypress. So the value asked for is remembered here for the next press.
+     */
+    private Boolean blind;
+
     private static final int LOGIN_RETRY_TICKS = 40;
 
     @Override
@@ -88,7 +102,17 @@ public class ClientProxy extends CommonProxy {
         // setting the press asks for is a per-player choice, kept by the server under the player's
         // UUID exactly like a guest's, and it survives a restart there rather than here.
         if (!PIIPolicy.clientKnows()) {
-            tell("Pickup into inventory is not running on this server, so there is nothing to toggle.");
+            // Which of the two it is cannot be told apart from here - a server without the mod
+            // drops the payload at the channel and a 1.3.0 server applies it without replying, and
+            // both look identical. So the press goes out and the player is told exactly that,
+            // rather than being told something false about either.
+            final boolean want = !(blind == null ? PIIConfig.enabled : blind.booleanValue());
+            blind = Boolean.valueOf(want);
+            request(want);
+            tell("Asked this server for pickup into inventory " + (want ? "ON" : "OFF")
+                + ". It has not told this client what it is running, so there is nothing to confirm"
+                + " that with: an older version of the mod applies it without answering, and a"
+                + " server without the mod ignores it.");
             return;
         }
 
@@ -126,6 +150,7 @@ public class ClientProxy extends CommonProxy {
         // otherwise land.
         announcement = null;
         login = 0;
+        blind = null;
         // Nothing is in force any more, so this client goes back to predicting exactly what a
         // client without the mod would - the one prediction that cannot disagree with a server it
         // has not spoken to yet.

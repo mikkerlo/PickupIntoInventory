@@ -63,8 +63,11 @@ public class PIICommand extends CommandBase {
         }
 
         if (PIIPolicy.isLocked()) {
-            reply(sender, "This server does not allow personal settings. It is currently "
-                + (PIIPolicy.serverDefault() ? "ON" : "OFF") + " for everyone.");
+            // The state itself is described in one place, so this sentence is only the refusal:
+            // a second hand-rolled wording for a locked server is the drift describe() exists to
+            // stop, and it had already started - this one said "for everyone" where describe says
+            // "locked by the server".
+            reply(sender, "This server does not allow personal settings. " + describe(player));
             return;
         }
 
