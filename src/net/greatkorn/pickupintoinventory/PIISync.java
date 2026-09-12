@@ -111,12 +111,10 @@ public final class PIISync {
 
     private static final Map<UUID, Pending> PENDING = new ConcurrentHashMap<UUID, Pending>();
 
-    /** Ids for our own confirmations, kept clear of any the connection is already waiting on. */
-    private static final AtomicInteger BARRIERS = new AtomicInteger();
-
     /** How many ids to step over before accepting one anyway; the map holds at most one per window. */
     private static final int BARRIER_ATTEMPTS = 4;
 
+    /** The innermost open frame on this thread, or the (closed) frame the thread reuses. */
     private static final ThreadLocal<Watch> WATCH = new ThreadLocal<Watch>();
 
     private PIISync() {}
@@ -127,14 +125,25 @@ public final class PIISync {
      * the redirect. Reused per thread: in singleplayer the logical client and the logical server
      * run this on separate threads.
      *
-     * Nesting-safe, the same way PIIContext is. Vanilla never reenters the call, but a mod that
-     * inserts a second item from inside a pickup would otherwise have its inner call diff and close
-     * the watch, and everything the outer call had already moved would go unmarked - which is the
-     * stale slot this whole mechanism exists to prevent. Only the outermost call snapshots and
-     * diffs. The only way out of addItemStackToInventory other than a return is the
-     * ReportedException vanilla's own catch builds, which skips the return injection and would
-     * leave the depth standing; the tick handler closes any watch it finds still open, so a mod
-     * that swallows that exception costs this thread one pickup rather than all of them.
+     * Nesting-safe, the same way PIIContext is, and nesting comes in two shapes. A mod inserting a
+     * second item into the *same* inventory from inside a pickup only raises the depth: the
+     * outermost call is the one that snapshots and diffs, so everything both calls moved is marked
+     * once. A mod inserting into a *different* inventory - party-share pickup, a magnet relaying to
+     * a teammate, "send the overflow to whoever has room" - pushes a frame of its own. Holding one
+     * slot per thread instead would let that inner call overwrite the outer player's snapshot and
+     * then close it, and the outer call would return to find its own frame gone and mark nothing:
+     * exactly the stale slot this mechanism exists to prevent, failing silently and for the player
+     * who was not even the subject of the inner call.
+     *
+     * Frames are kept and reused rather than allocated per pickup, so the common unnested case
+     * costs no allocation at all and a nesting depth costs one set of arrays for the life of the
+     * thread.
+     *
+     * The only way out of addItemStackToInventory other than a return is the ReportedException
+     * vanilla's own catch builds, which skips the return injection and would leave a frame
+     * standing. Both ends handle that: endPickup unwinds past any frame that is not the one it
+     * opened, diffing each rather than dropping it, and the tick handler closes whatever is still
+     * open at a point where no pickup can be in progress.
      */
     private static final class Watch {
 
@@ -143,10 +152,17 @@ public final class PIISync {
         final ItemStack[] before = new ItemStack[MAIN_END];
         final int[] sizes = new int[MAIN_END];
 
+        /** The frame this one was pushed over. Null on the frame the thread starts from. */
+        Watch outer;
+
+        /** A frame already built to push over this one, kept so a second nesting costs nothing. */
+        Watch inner;
+
         void close() {
             inventory = null;
             depth = 0;
             Arrays.fill(before, null); // nothing here should keep a stack alive
+            // outer and inner survive: they are the pooling, not the state.
         }
     }
 
@@ -166,13 +182,32 @@ public final class PIISync {
 
         /** Client-driven window actions seen so far; only differences between two reads matter. */
         final AtomicInteger actions = new AtomicInteger();
-        int actionsLastTick;
+
+        /**
+         * Starts at a count no read can produce, so the first tick after this record appears is
+         * never mistaken for a quiet one. noteWindowAction drops actions while no record exists,
+         * so a player clicking hard a tick before their first pickup would otherwise present a
+         * fresh 0 == 0 and draw a repair straight into the click stream - which self-heals, at the
+         * cost of the round it wastes.
+         */
+        int actionsLastTick = -1;
         int actionsAtRepair;
 
         volatile int actionsAtAnswer = NO_ANSWER;
         volatile boolean answerShared;
-        short barrier;
-        boolean awaitingAnswer;
+
+        // Read on the same path as actionsAtAnswer, so they carry the same defence: a mod that
+        // dispatches packets early would otherwise publish these two unsafely while the field
+        // beside them is protected, which is the worst of both.
+        volatile short barrier;
+        volatile boolean awaitingAnswer;
+
+        /** The id the round before this one used, kept only so the next round can avoid it. */
+        short lastBarrier;
+
+        /** Counted per player rather than per process, so one player cannot walk another's ids. */
+        short barrierSeq;
+
         int waited;
         int unanswered;
 
@@ -217,10 +252,21 @@ public final class PIISync {
         if (watch == null) {
             watch = new Watch();
             WATCH.set(watch);
-        }
-        if (watch.inventory == inventory) {
-            watch.depth++; // an inner call; the outermost snapshot is the one that counts
+        } else if (watch.inventory == inventory) {
+            watch.depth++; // an inner call on the same inventory; the outer snapshot counts
             return;
+        } else if (watch.inventory != null) {
+            // An insert into someone else's inventory from inside this one. The frame underneath
+            // stays exactly as it is, snapshot and all, and is current again the moment this one
+            // closes.
+            Watch pushed = watch.inner;
+            if (pushed == null) {
+                pushed = new Watch();
+                pushed.outer = watch;
+                watch.inner = pushed;
+            }
+            watch = pushed;
+            WATCH.set(watch);
         }
         final ItemStack[] main = inventory.field_70462_a;
         final int limit = Math.min(main.length, MAIN_END);
@@ -235,22 +281,49 @@ public final class PIISync {
 
     /** Called from the mixin as addItemStackToInventory returns; marks what actually moved. */
     public static void endPickup(InventoryPlayer inventory) {
-        final Watch watch = WATCH.get();
-        if (watch == null || watch.inventory != inventory) return;
-        if (--watch.depth > 0) return;
+        Watch watch = WATCH.get();
+        if (watch == null) return;
 
-        final ItemStack[] main = inventory.field_70462_a;
-        final int limit = Math.min(main.length, MAIN_END);
-        for (int i = MAIN_FIRST; i < MAIN_END; i++) {
-            final ItemStack stack = i < limit ? main[i] : null;
-            // A slot changes either by being handed a different stack object - vanilla always
-            // builds a new one - or by having its count raised, which is what a merge does.
-            if (stack == watch.before[i] && (stack == null || stack.field_77994_a == watch.sizes[i])) {
-                continue;
+        // Normally the top frame is the one this call opened. It is not when an inner insert threw
+        // and never ran its own endPickup. Finding the frame first, then unwinding to it, means an
+        // abandoned frame costs its own player a diff rather than costing the outer player their
+        // marks - the old single-slot version simply returned here and left them unmarked.
+        Watch owner = watch;
+        while (owner != null && owner.inventory != inventory) owner = owner.outer;
+        if (owner == null) return; // nothing here opened for this inventory
+
+        while (watch != owner) {
+            final Watch abandoned = watch;
+            watch = abandoned.outer;
+            closeFrame(abandoned);
+        }
+        if (--watch.depth > 0) return;
+        closeFrame(watch);
+    }
+
+    /**
+     * Marks whatever moved while this frame was open and makes the frame underneath current again.
+     * The outermost frame is kept in place rather than dropped, closed but allocated, because it is
+     * the one every unnested pickup on this thread reuses.
+     */
+    private static void closeFrame(Watch watch) {
+        final InventoryPlayer inventory = watch.inventory;
+        if (inventory != null) {
+            final ItemStack[] main = inventory.field_70462_a;
+            final int limit = Math.min(main.length, MAIN_END);
+            for (int i = MAIN_FIRST; i < MAIN_END; i++) {
+                final ItemStack stack = i < limit ? main[i] : null;
+                // A slot changes either by being handed a different stack object - vanilla always
+                // builds a new one - or by having its count raised, which is what a merge does.
+                if (stack == watch.before[i]
+                    && (stack == null || stack.field_77994_a == watch.sizes[i])) {
+                    continue;
+                }
+                markStale(inventory.field_70458_d, i);
             }
-            markStale(inventory.field_70458_d, i);
         }
         watch.close();
+        if (watch.outer != null) WATCH.set(watch.outer);
     }
 
     private static boolean tracks(EntityPlayer player) {
@@ -325,16 +398,26 @@ public final class PIISync {
         @SubscribeEvent
         public void onPlayerTick(TickEvent.PlayerTickEvent event) {
             if (event.phase != TickEvent.Phase.END || event.side != Side.SERVER) return;
+
+            // A frame still open here belongs to an addItemStackToInventory that never returned -
+            // vanilla's crash handler throws out of it, and another mixin cancelling the call at
+            // HEAD with setReturnValue skips the return injection too - so a mod that swallows
+            // that would otherwise leave this thread unable to track another pickup. No pickup is
+            // in progress at this point in the tick, so anything still open is finished with.
+            //
+            // This runs before the checks below rather than after them. Below, it is dead as soon
+            // as the last tracked player logs out: PENDING goes empty, the early return fires
+            // first, and a leaked frame keeps an InventoryPlayer - and through it an EntityPlayerMP
+            // and its WorldServer - for the life of the process.
+            for (Watch open = WATCH.get(); open != null && open.inventory != null;) {
+                final Watch abandoned = open;
+                open = abandoned.outer;
+                closeFrame(abandoned);
+            }
+
             if (PENDING.isEmpty() || !(event.player instanceof EntityPlayerMP)) return;
 
             final EntityPlayerMP player = (EntityPlayerMP) event.player;
-            // A watch still open here belongs to an addItemStackToInventory that never returned -
-            // vanilla's crash handler throws out of it - and a mod that swallows that exception
-            // would otherwise leave this thread unable to track another pickup. No pickup is in
-            // progress at this point in the tick, so anything still open is finished with.
-            final Watch watch = WATCH.get();
-            if (watch != null && watch.inventory != null) watch.close();
-
             final Pending pending = PENDING.get(player.func_110124_au());
             if (pending == null) return;
             if (player.field_71135_a == null) return; // logging out; nothing to talk to
@@ -362,7 +445,8 @@ public final class PIISync {
             pending.actionsAtRepair = actions;
             pending.beginRepair();
             repair(player, pending);
-            pending.barrier = nextBarrier(player);
+            pending.lastBarrier = pending.barrier;
+            pending.barrier = nextBarrier(player, pending);
             pending.actionsAtAnswer = NO_ANSWER;
             pending.answerShared = false;
             pending.awaitingAnswer = true;
@@ -380,16 +464,31 @@ public final class PIISync {
     /**
      * An id vanilla is itself waiting to hear about must not be reused: our answer would arrive
      * first and release a block vanilla is holding on purpose. See PIITransactions.
+     *
+     * Nor may the id of the round just before this one, whose echo can still be in flight when an
+     * abandoned round starts another. Taking that echo as this round's answer is harmless; the
+     * damage is the mirror case, where the id has meanwhile become one vanilla rejected a click
+     * with, our cancel eats the echo, func_75128_a(player, false) is never undone, and the player
+     * cannot click their own inventory again until they respawn - ContainerPlayer is built once
+     * per EntityPlayerMP. Improbable and silent, and one comparison to rule out.
+     *
+     * The counter is the player's own, so the wrap that makes any of this reachable at all is
+     * 65536 rounds for that one player rather than 65536 shared across everyone online.
      */
-    private static short nextBarrier(EntityPlayerMP player) {
+    private static short nextBarrier(EntityPlayerMP player, Pending pending) {
         final PIITransactions handler = player.field_71135_a instanceof PIITransactions
             ? (PIITransactions) player.field_71135_a
             : null;
-        short id = (short) BARRIERS.incrementAndGet();
-        for (int i = 0; handler != null && i < BARRIER_ATTEMPTS && handler.pii$awaits(0, id); i++) {
-            id = (short) BARRIERS.incrementAndGet();
+        short id = ++pending.barrierSeq;
+        for (int i = 0; i < BARRIER_ATTEMPTS && taken(handler, pending, id); i++) {
+            id = ++pending.barrierSeq;
         }
         return id;
+    }
+
+    private static boolean taken(PIITransactions handler, Pending pending, short id) {
+        if (id == pending.lastBarrier) return true;
+        return handler != null && handler.pii$awaits(0, id);
     }
 
     /**
