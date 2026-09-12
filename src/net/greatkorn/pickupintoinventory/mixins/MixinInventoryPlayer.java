@@ -40,9 +40,18 @@ public abstract class MixinInventoryPlayer {
      * summed over every target before it is compared, so a single annotation can only assert a
      * total. The totals differ - func_70441_a invokes getFirstEmptyStack once (offset 99),
      * storePartialItemStack twice (19 and 67) - and a single require = 3 would be satisfied by
-     * three hits anywhere among them. Split, each number is exact, so losing either of the
-     * storePartialItemStack sites - the path every undamaged item takes, which is very nearly all
-     * of them - is a startup failure rather than a mod that quietly stops routing.
+     * three hits anywhere among them: both of storePartialItemStack's plus one more found somewhere
+     * a coremod had rewritten func_70441_a, or neither of them and three in that one method. Split,
+     * the floor is per method, so losing either storePartialItemStack site - the path every
+     * undamaged item takes, which is very nearly all of them - is a startup failure rather than a
+     * mod that quietly stops routing.
+     *
+     * A floor is all it is. require only fails when injectedCallbackCount is below it; the ceiling
+     * is allowedCallbackCount, a separate field, and neither annotation sets it. That is deliberate:
+     * an extra call site here is a pack coremod having added one, and binding to it as well is the
+     * right answer - the redirect calls the original and reasons about the answer, so a site it did
+     * not expect still routes. Refusing to launch over it would trade a working game for a tighter
+     * assertion. What the numbers buy is the other direction, which is the one that fails quietly.
      *
      * The handlers delegate rather than duplicate; the logic is in pii$chooseSlot below.
      */
