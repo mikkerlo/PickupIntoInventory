@@ -19,8 +19,10 @@ import net.minecraft.item.ItemStack;
  * returning the empty bottle. Mod code does not stay that small - a discarding
  * addItemStackToInventory with no check on the result is a common idiom in backpack returns,
  * machine output-to-player and quest rewards - so a list of who must not be refused has to be
- * rewritten every time the pack changes, and is right in the player's favour only by accident. A
- * list of who may be refused is two callers, in Minecraft, and cannot go stale.
+ * rewritten every time the pack changes, and every line it is missing is wrong in the player's
+ * favour: the caller not on it is refused, and if it discards the answer the item is gone. A list of
+ * who may be refused is two callers, in Minecraft, and cannot go stale - a caller missing from that
+ * one is simply not refused, which costs the setting and nothing else.
  *
  * What it costs is that allowHotbarWhenInventoryFull=false no longer holds for an item a mod hands
  * over directly - a magnet, a quest reward, a machine emptying into the player - which takes the

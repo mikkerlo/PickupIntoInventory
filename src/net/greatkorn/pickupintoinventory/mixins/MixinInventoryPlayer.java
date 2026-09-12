@@ -34,13 +34,39 @@ public abstract class MixinInventoryPlayer {
     /** Slots past this are appended by other mods (Backhand's offhand, BG2's quiver) - not pickup targets. */
     private static final int PII_VANILLA_MAIN_SIZE = 36;
 
+    /**
+     * Two annotations rather than one listing both methods, because require is a property of the
+     * annotation and not of the target: injectedCallbackCount is one field on the InjectionInfo,
+     * summed over every target before it is compared, so a single annotation can only assert a
+     * total. The totals differ - func_70441_a invokes getFirstEmptyStack once (offset 99),
+     * storePartialItemStack twice (19 and 67) - and a single require = 3 would be satisfied by
+     * three hits anywhere among them. Split, each number is exact, so losing either of the
+     * storePartialItemStack sites - the path every undamaged item takes, which is very nearly all
+     * of them - is a startup failure rather than a mod that quietly stops routing.
+     *
+     * The handlers delegate rather than duplicate; the logic is in pii$chooseSlot below.
+     */
     @Redirect(
-        method = { "func_70441_a(Lnet/minecraft/item/ItemStack;)Z",
-                   "func_70452_e(Lnet/minecraft/item/ItemStack;)I" },
+        method = "func_70441_a(Lnet/minecraft/item/ItemStack;)Z",
         at = @At(
             value = "INVOKE",
-            target = "Lnet/minecraft/entity/player/InventoryPlayer;func_70447_i()I"))
-    private int pii$preferMainInventory(InventoryPlayer self, ItemStack inserting) {
+            target = "Lnet/minecraft/entity/player/InventoryPlayer;func_70447_i()I"),
+        require = 1)
+    private int pii$preferMainInventoryWhole(InventoryPlayer self, ItemStack inserting) {
+        return pii$chooseSlot(self, inserting);
+    }
+
+    @Redirect(
+        method = "func_70452_e(Lnet/minecraft/item/ItemStack;)I",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/entity/player/InventoryPlayer;func_70447_i()I"),
+        require = 2)
+    private int pii$preferMainInventoryPartial(InventoryPlayer self, ItemStack inserting) {
+        return pii$chooseSlot(self, inserting);
+    }
+
+    private int pii$chooseSlot(InventoryPlayer self, ItemStack inserting) {
         final int slot = self.func_70447_i();
         final EntityPlayer owner = self.field_70458_d;
 
@@ -100,10 +126,15 @@ public abstract class MixinInventoryPlayer {
         //
         // Capabilities are not null-guarded. There is a window in which they are null -
         // EntityPlayer's constructor assigns field_71071_by at offset 14 and field_71075_bZ only at
-        // 47 - but vanilla's own func_70441_a dereferences field_70458_d.field_71075_bZ
-        // .field_75098_d unguarded further down the same method, so anything able to reach here
-        // inside that window has already crashed on vanilla's line. A check would be dead code
-        // that reads as though it were load-bearing.
+        // 47 - and the isGroundPickup gate one line above is what makes this line unreachable
+        // inside it: the mark is only ever set by an EntityItem or EntityArrow collision, and
+        // neither can happen from inside EntityPlayer's own constructor. A check here would be dead
+        // code that reads as though it were load-bearing.
+        //
+        // Not, as this comment said until review: because vanilla dereferences the same field later
+        // in func_70441_a. It does, at 135-141, but the redirect runs at 99, so nothing has crashed
+        // yet - and two of the three redirect sites are in func_70452_e, which never touches
+        // field_71075_bZ at all. The conclusion was right and the reason was not.
         if (owner != null && owner.field_71075_bZ.field_75098_d) return slot;
 
         // Asked of the policy rather than the local config, though nothing now depends on the
@@ -114,12 +145,12 @@ public abstract class MixinInventoryPlayer {
         // gone with the whitelist inverted - both sides now take the branch above - and the client's
         // copy of the setting is kept as a guard rather than as something it routes on.
         //
-        // A refusal is a divergence, and one nothing else can see: this side writes no slot, so
-        // the diff around the pickup finds nothing to resend, while a client that is not running
-        // the redirect has no refusal either and has put the item in `slot`. Every caller that
-        // reaches here runs on both sides - ItemBucket.fillBucket, ItemGlassBottle, EntityCow's
-        // interact, SlotCrafting - so the ghost is not hypothetical, and it persists until
-        // something unrelated rewrites the slot.
+        // A refusal is still a divergence the diff cannot see - this side writes no slot, so there
+        // is nothing around the pickup to resend - but with the whitelist inverted the client is
+        // not predicting this branch to begin with: it has no ground pickup of its own, so it holds
+        // whatever the last S2F/S30 told it. The mark is what closes that, and it is taken here for
+        // the same reason as everywhere else in this method rather than because some particular
+        // caller is known to reach it.
         final boolean fallback = PIIPolicy.allowsHotbarFallback(owner);
         if (!fallback) PIISync.noteForeignSlot(owner, slot);
         return fallback ? slot : -1;
