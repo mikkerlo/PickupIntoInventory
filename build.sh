@@ -23,6 +23,14 @@ LIBS="${LIBS:-$HOME/PrismLauncher/libraries}"
 : "${FORGE:=$(ls "$LIBS"/net/minecraftforge/forge/1.7.10-*/forge-1.7.10-*-universal.jar | head -1)}"
 : "${NETTY:=$(ls "$LIBS"/io/netty/netty-all/*/netty-all-*.jar | head -1)}"
 
+# --release arrived in JDK 9, and the JDK on hand for a 1.7.10 mod is quite often 8, which
+# rejects the flag outright. Nothing is lost there: on 8, -source/-target compile against that
+# JDK's own Java 8 library, which is the thing --release 8 emulates on a newer one. Parsed
+# rather than probed, because a probe that fails for some other reason would quietly pick the
+# weaker form on a JDK that can do better. javac 8 prints its version to stderr, 9+ to stdout.
+JAVAC_MAJOR="$(javac -version 2>&1 | sed -n 's/^javac \(1\.\)\?\([0-9][0-9]*\).*/\2/p')"
+if [ "${JAVAC_MAJOR:-9}" -ge 9 ]; then JAVA8=(--release 8); else JAVA8=(-source 8 -target 8); fi
+
 VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$HERE/resources/mcmod.info" | head -1)"
 [ -n "$VERSION" ] || { echo "could not read version from resources/mcmod.info" >&2; exit 1; }
 
@@ -37,6 +45,8 @@ ASM="asm-9.7.jar:asm-commons-9.7.jar:asm-tree-9.7.jar:asm-analysis-9.7.jar"
 # those two jars, so it is cached. FORCE_REMAP=1 rebuilds it after changing Remap.java.
 if [ ! -f mc-srg.jar ] || [ ! -f forge-srg.jar ] || [ -n "${FORCE_REMAP:-}" ]; then
     rm -rf mappings && mkdir mappings && (cd mappings && unzip -oq "$FPL" '*.csv')
+    # javac 9+ creates the -d directory; javac 8 insists it already exist.
+    mkdir -p remapper
     javac -cp "$ASM" -d remapper "$HERE/tools/Remap.java"
     java -cp "$ASM:remapper" Remap mappings "$MC"    mc-srg.jar
     java -cp "$ASM:remapper" Remap mappings "$FORGE" forge-srg.jar
@@ -47,7 +57,7 @@ fi
 cd "$HERE"
 rm -rf "$WORK/classes" && mkdir -p "$WORK/classes"
 # -proc:none: we hand-wrote SRG targets, so the Mixin AP must not try to build a refmap.
-javac --release 8 -proc:none -nowarn \
+javac "${JAVA8[@]}" -proc:none -nowarn \
       -cp "$WORK/tools/mc-srg.jar:$WORK/tools/forge-srg.jar:$UNIMIXINS:$NETTY" \
       -d "$WORK/classes" $(find src -name '*.java')
 cp -r resources/* "$WORK/classes/"
