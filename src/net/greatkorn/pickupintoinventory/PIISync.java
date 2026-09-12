@@ -88,6 +88,12 @@ import cpw.mods.fml.relauncher.Side;
  * overwrite a prediction, but that is detected and undone within a round trip of them stopping.
  * If the answer never comes at all the round is abandoned after five seconds so the mechanism
  * cannot wedge.
+ *
+ * tools/protocol runs that argument: a model of both halves of the exchange, built from the
+ * disassembly named above, which reproduces both of the bugs this class exists for and then looks
+ * for a pair of inventories that will not converge across randomised pickup and click
+ * interleavings. Its server half is a transcription of the state machine below and can drift from
+ * it, so it is an argument that can be re-run and disagreed with rather than a test of this file.
  */
 public final class PIISync {
 
