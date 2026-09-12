@@ -19,7 +19,18 @@ import cpw.mods.fml.common.network.FMLNetworkEvent;
 
 public class ClientProxy extends CommonProxy {
 
-    private boolean connected;
+    /**
+     * All four of the fields below are written from the netty event loop and read on the client
+     * thread, so all four are volatile.
+     *
+     * FML posts ClientConnectedToServerEvent and ClientDisconnectionFromServerEvent from inside its
+     * own pipeline handler - FMLHandshakeClientState$6.accept -> NetworkDispatcher.completeHandshake
+     * -> completeClientSideConnection, all under channelRead0 - not from the client thread's packet
+     * queue. The queue is where policyReceived runs, which is a different thread again. Nothing here
+     * is a compound update, so volatile is the whole of what is needed; the visible symptom of it
+     * missing was a clear at disconnect that the tick handler never saw.
+     */
+    private volatile boolean connected;
 
     /**
      * Set when the player changes their setting with nowhere to send it - the config screen is
@@ -32,7 +43,7 @@ public class ClientProxy extends CommonProxy {
 
     private KeyBinding toggleKey;
 
-    /** A line the server's answer left for the client thread to print, from the packet queue. */
+    /** A line the server's answer left for the client thread to print. */
     private volatile String announcement;
 
     /**
@@ -47,7 +58,17 @@ public class ClientProxy extends CommonProxy {
      * rest of the session and the keybind reports that the mod is not on the server. One resend a
      * couple of seconds in costs a client that was answered nothing at all.
      */
-    private int login;
+    private volatile int login;
+
+    /**
+     * The mode onConnect sent, replayed by the retry rather than assumed.
+     *
+     * A resend that hardcoded MODE_LOGIN would downgrade the one case the retry exists for. A
+     * config-screen edit made from the title screen goes out as MODE_EXPLICIT, because a server
+     * already holding a stored choice for this player is right to ignore a default - so replaying
+     * it as a default is the same as losing it, which is precisely what the drop had already done.
+     */
+    private volatile byte loginMode;
 
     /**
      * What this client last asked for while the server has said nothing back, or null.
@@ -60,8 +81,13 @@ public class ClientProxy extends CommonProxy {
      *
      * There is nothing to toggle from in that state: no answer, and the local file is deliberately
      * not written by a keypress. So the value asked for is remembered here for the next press.
+     *
+     * It also stands the login retry down. A press inside the first forty ticks has already sent a
+     * MODE_EXPLICIT of its own, and a 1.3.0 server applies that and says nothing; the retry would
+     * then arrive behind it with the file's value under MODE_LOGIN, which that server applies just
+     * as readily - silently undoing the toggle the player had just asked for.
      */
-    private Boolean blind;
+    private volatile Boolean blind;
 
     private static final int LOGIN_RETRY_TICKS = 40;
 
@@ -130,15 +156,18 @@ public class ClientProxy extends CommonProxy {
     public void onConnect(FMLNetworkEvent.ClientConnectedToServerEvent event) {
         connected = true;
         login = 1;
-        // Belt and braces: the disconnect event only fires where the teardown goes out through the
-        // pipeline, and carrying the last server's policy into this one would have us predicting
-        // its routing until this one answers.
+        // Belt and braces, for the teardown paths the disconnect event never reaches: carrying the
+        // last server's policy into this one would have us predicting its routing until this one
+        // answers, a parked announcement would print the old server's policy into this server's
+        // first tick, and a stale `blind` would decide the next keypress from what some other
+        // server had been asked for.
         PIIPolicy.forgetServerPolicy();
+        announcement = null;
+        blind = null;
         // A preference the player has not touched is a default the server may fall back on; one
         // they changed while there was nobody to tell is an instruction that has been waiting.
-        send(
-            pendingChange ? MsgSetPreference.MODE_EXPLICIT : MsgSetPreference.MODE_LOGIN,
-            PIIConfig.enabled);
+        loginMode = pendingChange ? MsgSetPreference.MODE_EXPLICIT : MsgSetPreference.MODE_LOGIN;
+        send(loginMode, PIIConfig.enabled);
         pendingChange = false;
     }
 
@@ -183,9 +212,10 @@ public class ClientProxy extends CommonProxy {
             if (++login > LOGIN_RETRY_TICKS) {
                 login = 0;
                 // Only where nothing came back. A server with the mod has answered long before
-                // this, and one without it drops the payload at the channel either way.
-                if (connected && !PIIPolicy.clientKnows()) {
-                    send(MsgSetPreference.MODE_LOGIN, PIIConfig.enabled);
+                // this, and one without it drops the payload at the channel either way. A press
+                // in the meantime stands the retry down: see `blind`.
+                if (connected && blind == null && !PIIPolicy.clientKnows()) {
+                    send(loginMode, PIIConfig.enabled);
                 }
             }
         }
