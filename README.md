@@ -100,7 +100,10 @@ way it always was — which also means such a client still cannot keep a `/picku
 reconnect, and still routes on its own config. The server repairs what that costs: whenever it
 cannot know a client is routing the way it is, it also resends the slots only the other side can
 have written. A newer client on an older server reads there as the older client it replaces, because
-the new fields are on the end of the message where an older server ignores them.
+the new fields are on the end of the message where an older server ignores them - so the keybind
+still sets a preference there, it just gets no answer back, and says so rather than claiming the
+server has no mod. A server with no mod at all is told apart from neither, because from the client
+they are the same silence.
 
 ## Building
 
