@@ -47,6 +47,12 @@ jobs:
           source build/deps/env.sh
           ./build.sh
 
+      # Compiles the live PIIState against Forge and runs both persistence harnesses. It needs
+      # the fetched jars (run.sh sources build/deps/env.sh itself), so it cannot sit beside the
+      # protocol model above; it runs after the build so a broken compile is reported first.
+      - name: Persistence harnesses
+        run: tools/persist/run.sh
+
       - uses: actions/upload-artifact@v7
         with:
           name: pickupintoinventory

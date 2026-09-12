@@ -51,18 +51,26 @@ import cpw.mods.fml.common.FMLLog;
  * of them can hold a tick up. The map stays concurrent because that daemon reads it while the
  * server thread writes it.
  *
- * The two things that could be lost that way are given back. The file is replaced atomically, so a
- * write that dies part way through leaves the previous one whole rather than a truncated stub, and
- * the world's stop flushes synchronously, so the last /pickupinv before a shutdown is on disk
- * before the server is gone.
+ * The two things that could be lost that way are given back, as far as they can be. The file is
+ * replaced atomically, so a write that dies part way through leaves the previous one whole rather
+ * than a truncated stub, and the world's stop flushes synchronously rather than hoping the daemon
+ * gets there, so the last /pickupinv before a shutdown is normally on disk before the server is
+ * gone.
  *
  * <h3>What is still lost, and what is not</h3>
  *
  * Moving the write off the tick buys the tick back at the price of a window. A change made in the
  * second before the machine loses power, or before the JVM is killed outright, is not on disk and
- * is gone; a change made before an orderly stop is written, because the stop waits for it. That is
- * the trade, and it is worth stating plainly rather than as "a moment later": the exposure is up
- * to WRITE_INTERVAL_MS plus one write, not an instant.
+ * is gone; a change made before an orderly stop is attempted there, because the stop does the
+ * write itself instead of waiting on the daemon. That is the trade, and it is worth stating
+ * plainly rather than as "a moment later": the exposure is up to WRITE_INTERVAL_MS plus one write,
+ * not an instant.
+ *
+ * Attempted, not guaranteed. flush() is one more write and can fail like any other - a full disk,
+ * a file another process holds - and it will not wait longer than FLUSH_WAIT_MS for a write
+ * already in flight, so a stop over a hung mount returns having written nothing. Both cases are
+ * logged at ERROR and neither holds the shutdown open; what the stop removes is the ordinary
+ * window, not every way a write can fail.
  *
  * A write that <em>fails</em> is not in that category and must not be treated as one. Recording a
  * failed write as done loses the change permanently - including at the shutdown flush, which would
@@ -134,8 +142,8 @@ public final class PIIState {
      *
      * On Windows a file this process does not have open can still be held by something else -
      * Defender mid-scan, OneDrive, a backup agent - and MoveFileEx answers ACCESS_DENIED, which
-     * arrives here as a plain FileSystemException rather than AtomicMoveNotSupportedException, so
-     * the non-atomic fallback is no help at all. Those holders let go in milliseconds.
+     * arrives here as AccessDeniedException rather than AtomicMoveNotSupportedException, so the
+     * non-atomic fallback is no help at all. Those holders let go in milliseconds.
      */
     private static final int REPLACE_ATTEMPTS = 3;
 
@@ -203,6 +211,15 @@ public final class PIIState {
     public static void init(File f) {
         file = f;
         OVERRIDES.clear();
+        synchronized (PENDING_LOCK) {
+            // The map now says exactly what this file says, so nothing is outstanding against it
+            // and a parked failure against the previous one means nothing here. No writer is
+            // started: there is nothing for it to do, and one is started by the first real change.
+            // This runs from preInit, before any change and before any writer exists; it is not a
+            // reload and must not be called while the server is running.
+            stored = changed;
+            failedAt = 0;
+        }
         if (!f.isFile()) return;
         Properties p = new Properties();
         InputStream in = null;
@@ -246,10 +263,11 @@ public final class PIIState {
     /** Started on the first real change rather than at load, so a client that never touches its
      *  setting - and a dedicated server nobody plays on - never pays for a thread. */
     private static void startWriter() { // caller holds PENDING_LOCK
-        // isAlive as well as null, because writeLoop clears the field in a finally: a change made
-        // between a RuntimeException unwinding the loop and that finally running would otherwise
-        // see a thread that is on its way out, decline to start a replacement, and be the last
-        // change this process ever writes.
+        // isAlive as well as null, to keep two writers from running at once. It does not settle
+        // the dying-thread case on its own: a thread inside its own finally is still alive, and
+        // that finally wants PENDING_LOCK, so a change holding the lock here sees a live thread
+        // and declines. What closes it is the other end - writeLoop restarts from the finally if
+        // it is leaving work behind.
         if (writer != null && writer.isAlive()) return;
         writer = new Thread(new Runnable() {
 
@@ -288,7 +306,17 @@ public final class PIIState {
             // worse than the bug this class is fixing. Dropping it lets the next change start
             // another, and flush() would still write on its own thread regardless.
             synchronized (PENDING_LOCK) {
-                writer = null;
+                // Only if this thread is still the one on record. startWriter runs under the same
+                // lock and may already have installed a replacement, and clearing the field then
+                // would strand it.
+                if (writer == Thread.currentThread()) {
+                    writer = null;
+                    // A change made between the loop unwinding and this block saw a thread that
+                    // was alive and declined to start a replacement; it is not going to look
+                    // again. So the departing thread starts the replacement itself, and only when
+                    // there is something for it to do - the same condition the loop waits on.
+                    if (stored != changed && changed != failedAt) startWriter();
+                }
             }
         }
     }
@@ -341,6 +369,16 @@ public final class PIIState {
                     snapshot.setProperty(e.getKey().toString(), e.getValue().token());
                 }
                 written = write(target, snapshot);
+            } else {
+                // Nowhere to write: init() has not run yet, or ran without a file. The change is
+                // parked below exactly as a failed one is, and it is worth a line of its own -
+                // otherwise a server whose config directory never resolved is indistinguishable in
+                // the log from one that had nothing to save.
+                FMLLog.log(
+                    "PickupIntoInventory",
+                    Level.ERROR,
+                    "no preference file has been set; changes up to %d are held in memory only",
+                    Long.valueOf(generation));
             }
             synchronized (PENDING_LOCK) {
                 if (written) {
@@ -431,8 +469,9 @@ public final class PIIState {
                 return;
             } catch (IOException busy) {
                 // The Windows case: something outside this process has the target open, MoveFileEx
-                // answers ACCESS_DENIED, and it arrives as a generic FileSystemException, so the
-                // fallback above never sees it. Whoever has it lets go in milliseconds.
+                // answers ACCESS_DENIED, and it arrives as AccessDeniedException - a
+                // FileSystemException, but not the one the fallback above catches. Whoever has it
+                // lets go in milliseconds.
                 last = busy;
             }
         }
