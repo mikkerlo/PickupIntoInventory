@@ -13,7 +13,7 @@ import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 @Mod(
     modid = PIIConfig.MODID,
     name = "Pickup Into Inventory",
-    version = "1.3.0",
+    version = "1.4.0",
     guiFactory = "net.greatkorn.pickupintoinventory.client.PIIGuiFactory",
     acceptableRemoteVersions = "*")
 public class PickupIntoInventory {

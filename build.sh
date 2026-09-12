@@ -35,6 +35,21 @@ if [ "${JAVAC_MAJOR:-9}" -ge 9 ]; then JAVA8=(--release 8); else JAVA8=(-source 
 VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$HERE/resources/mcmod.info" | head -1)"
 [ -n "$VERSION" ] || { echo "could not read version from resources/mcmod.info" >&2; exit 1; }
 
+# The @Mod annotation carries a version of its own, and FML prefers it in silence: bindMetadata
+# reads internalVersion straight out of the annotation and only falls back to version.properties or
+# mcmod.info - logging that it did - when the annotation is null or empty. A populated annotation and
+# a different mcmod.info therefore coexist with no warning at all, and the two are then read by
+# different callers: getVersion() and getProcessedVersion() answer the annotation, getDisplayVersion()
+# answers mcmod.info. Which is how the jar came to be named 1.4.0 while the mod called itself 1.3.0.
+# Checked rather than derived because the annotation has to be a compile-time constant.
+ANNOTATED="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$HERE/src/net/greatkorn/pickupintoinventory/PickupIntoInventory.java" | head -1)"
+[ -n "$ANNOTATED" ] || { echo "could not read version from the @Mod annotation" >&2; exit 1; }
+[ "$ANNOTATED" = "$VERSION" ] || {
+    echo "version mismatch: @Mod says $ANNOTATED, resources/mcmod.info says $VERSION" >&2
+    exit 1
+}
+
 mkdir -p "$WORK/tools"
 cd "$WORK/tools"
 for a in asm asm-tree asm-analysis asm-commons; do
