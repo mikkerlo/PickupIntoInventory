@@ -110,6 +110,10 @@ public class MsgSetPreference implements IMessage {
             EntityPlayerMP player = ctx.getServerHandler().field_147369_b;
             if (player == null) return null;
             final UUID id = player.func_110124_au();
+            // Before the modal split, because a 1.3.0 client counts just as much: what this marks
+            // is that something on the other end is running the mod at all, which is what lets the
+            // redirect-off branch stop repairing slots a bare vanilla client cannot get wrong.
+            PIIPolicy.noteMod(id);
 
             if (!msg.modal) {
                 // A 1.3.0 client. It cannot say what kind of request this is, so every one of them

@@ -82,6 +82,23 @@ public final class PIIPolicy {
          */
         volatile byte sent;
         volatile boolean acked;
+
+        /**
+         * A policy has actually been pushed, so `sent` means something.
+         *
+         * Without it, a Session created by a first message of MODE_ACK with serial 0 satisfies
+         * `sent == serial` against the default 0 and the server concludes a client it has never
+         * told anything is mirroring it. Only a modified client can do that and the damage is
+         * confined to its own inventory, but `sent` legitimately returns to 0 every 256 pushes,
+         * so special-casing the value rather than the state gets slowly worse.
+         */
+        volatile boolean pushed;
+
+        /**
+         * This client sent a preference of its own, so there is a mod on the other end - possibly
+         * one too old to be told a policy. A bare vanilla client never sends one.
+         */
+        volatile boolean hasMod;
     }
 
     private static final Map<UUID, Session> SESSIONS = new ConcurrentHashMap<UUID, Session>();
@@ -281,13 +298,25 @@ public final class PIIPolicy {
         final Session session = sessionFor(id);
         session.acked = false;
         session.sent = (byte) (session.sent + 1);
+        session.pushed = true;
         return session.sent;
     }
 
     /** An answer, accepted only for the policy currently in force. */
     public static void noteMirror(UUID id, byte serial) {
         final Session session = SESSIONS.get(id);
-        if (session != null && session.sent == serial) session.acked = true;
+        if (session != null && session.pushed && session.sent == serial) session.acked = true;
+    }
+
+    /** Set by any preference this client sends, which is the one thing only a mod does. */
+    public static void noteMod(UUID id) {
+        sessionFor(id).hasMod = true;
+    }
+
+    /** Whether anything at all on the other end is running this mod, of any version. */
+    public static boolean hasMod(UUID id) {
+        final Session session = SESSIONS.get(id);
+        return session != null && session.hasMod;
     }
 
     /** Whether this client is known to be routing pickups exactly as this side does. */

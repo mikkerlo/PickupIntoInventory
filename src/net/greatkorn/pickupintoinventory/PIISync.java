@@ -404,6 +404,27 @@ public final class PIISync {
     }
 
     /**
+     * The same question for the branch where this side is *not* routing, where the answer has to
+     * be narrower.
+     *
+     * With the redirect on, a client that cannot confirm it mirrors us may be routing differently
+     * and the repair is necessary. With the redirect off, this side routes exactly as vanilla
+     * does, so a client with no mod at all cannot disagree with us - yet it can never acknowledge
+     * anything either, so the broad gate is permanently true for it. That is the majority
+     * population on a server that installs the jar server-side only, which is a supported setup:
+     * two marks, a Pending record and a 36-slot window packet per pickup, forever, for players the
+     * mod is doing nothing for.
+     *
+     * The case the branch was written for is the 1.3.0 client, which routes on its own config and
+     * so can diverge here - and that client is distinguishable, because it sends a preference on
+     * connect and a bare vanilla client sends nothing at all.
+     */
+    public static boolean repairsOffBranch(EntityPlayer player) {
+        if (!repairsForeignSlots(player)) return false;
+        return PIIPolicy.hasMod(player.func_110124_au());
+    }
+
+    /**
      * One slot an insertion may have put an item into on a client that is not routing the way this
      * side is - or left empty where this side filled it.
      *
