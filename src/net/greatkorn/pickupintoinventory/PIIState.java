@@ -13,8 +13,10 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * What each player has asked for, held and persisted by whichever side is the logical server.
- * Written from the netty thread when a client sends its preference, so the map is concurrent and
- * file writes are serialised.
+ * Every change arrives on the main server thread - FMLProxyPacket does not override
+ * Packet.hasPriority, so a preference message is queued by NetworkManager and drained in the tick
+ * loop, and /pickupinv runs there too. The map is concurrent and the writes serialised anyway,
+ * because nothing here should depend on that staying true.
  *
  * Three answers, not two. "Follow the server" has to be an answer of its own rather than the
  * absence of one, because the absence is what lets a client's local setting fill the gap the first

@@ -32,8 +32,24 @@ public class ClientProxy extends CommonProxy {
 
     private KeyBinding toggleKey;
 
-    /** A line the server's answer left for the client thread to print. Written from netty. */
+    /** A line the server's answer left for the client thread to print, from the packet queue. */
     private volatile String announcement;
+
+    /**
+     * Client ticks since connecting, while the server still owes an answer. Counted up to the
+     * retry below and then left alone.
+     *
+     * The login preference is sent from ClientConnectedToServerEvent, which fires before FML's
+     * final handshake ack, so the server may still be on the login handler when it drains the
+     * queue. The server's guard there is right - casting would cost the player the connection -
+     * but it drops the message, and the drop is terminal: the server never marks this client as
+     * one it can answer, so it never sends a policy, this side predicts vanilla routing for the
+     * rest of the session and the keybind reports that the mod is not on the server. One resend a
+     * couple of seconds in costs a client that was answered nothing at all.
+     */
+    private int login;
+
+    private static final int LOGIN_RETRY_TICKS = 40;
 
     @Override
     public void preInit() {
@@ -89,6 +105,7 @@ public class ClientProxy extends CommonProxy {
     @SubscribeEvent
     public void onConnect(FMLNetworkEvent.ClientConnectedToServerEvent event) {
         connected = true;
+        login = 1;
         // Belt and braces: the disconnect event only fires where the teardown goes out through the
         // pipeline, and carrying the last server's policy into this one would have us predicting
         // its routing until this one answers.
@@ -104,6 +121,11 @@ public class ClientProxy extends CommonProxy {
     @SubscribeEvent
     public void onDisconnect(FMLNetworkEvent.ClientDisconnectionFromServerEvent event) {
         connected = false;
+        // Including a line that never found a tick with a player in it to print into. It describes
+        // a policy that is no longer in force, and the next server's first tick is where it would
+        // otherwise land.
+        announcement = null;
+        login = 0;
         // Nothing is in force any more, so this client goes back to predicting exactly what a
         // client without the mod would - the one prediction that cannot disagree with a server it
         // has not spoken to yet.
@@ -131,6 +153,18 @@ public class ClientProxy extends CommonProxy {
     @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
+
+        if (login > 0) {
+            if (++login > LOGIN_RETRY_TICKS) {
+                login = 0;
+                // Only where nothing came back. A server with the mod has answered long before
+                // this, and one without it drops the payload at the channel either way.
+                if (connected && !PIIPolicy.clientKnows()) {
+                    send(MsgSetPreference.MODE_LOGIN, PIIConfig.enabled);
+                }
+            }
+        }
+
         final String line = announcement;
         if (line == null) return;
         // Kept until it has somewhere to go. The answer to a keybind press can arrive in the tick

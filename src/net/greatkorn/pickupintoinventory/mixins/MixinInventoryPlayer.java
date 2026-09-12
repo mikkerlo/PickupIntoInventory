@@ -56,10 +56,15 @@ public abstract class MixinInventoryPlayer {
             // is wrong twice over: an item it does not have where vanilla put it, and one it does
             // have where this side left a gap. The gate is asked before the scan because for
             // everyone else there is nothing here to do.
-            if (PIISync.repairsForeignSlots(owner)) {
+            if (PIISync.repairsOffBranch(owner)) {
                 final int predicted = pii$firstEmptyMain(inv);
                 if (predicted >= 0) {
                     PIISync.noteForeignSlot(owner, predicted);
+                    PIISync.noteForeignSlot(owner, slot);
+                } else if (!PIIPolicy.allowsHotbarFallback(owner)) {
+                    // Main full, so the other side has nowhere to route to and the branch above
+                    // marks nothing - but a client still running the redirect with a refusal of
+                    // its own leaves the item on the ground while this side puts it in `slot`.
                     PIISync.noteForeignSlot(owner, slot);
                 }
             }
@@ -88,9 +93,15 @@ public abstract class MixinInventoryPlayer {
         // predicting a swap has to refuse in exactly the places the server refuses, or the two
         // disagree about where the displaced stack went in the one branch that can also drop it.
         //
-        // Nothing is marked down here. With no empty main slot there is nowhere for a differently
-        // routing client to have put the item either, so both sides land on the same slot.
-        return PIIPolicy.allowsHotbarFallback(owner) ? slot : -1;
+        // A refusal is a divergence, and one nothing else can see: this side writes no slot, so
+        // the diff around the pickup finds nothing to resend, while a client that is not running
+        // the redirect has no refusal either and has put the item in `slot`. Every caller that
+        // reaches here runs on both sides - ItemBucket.fillBucket, ItemGlassBottle, EntityCow's
+        // interact, SlotCrafting - so the ghost is not hypothetical, and it persists until
+        // something unrelated rewrites the slot.
+        final boolean fallback = PIIPolicy.allowsHotbarFallback(owner);
+        if (!fallback) PIISync.noteForeignSlot(owner, slot);
+        return fallback ? slot : -1;
     }
 
     /** The slot the redirect steers to, and the slot a client still running it has predicted. */
