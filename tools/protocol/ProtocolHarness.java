@@ -27,6 +27,7 @@ public final class ProtocolHarness {
         aRepairWithoutItsAnswerLeavesAGhost();
         theAnswerCatchesTheGhost();
         theCreativeTabIsRepairedByAPrefix();
+        aForeignHotbarSlotIsRepairedByTheWholeContainer();
         aPerSlotRepairIsDroppedAndTheMarksAreLost();
         theWindowZeroSnapshotSurvivesTheSameScreen();
         aCloseWindowCountsAsAWindowAction();
@@ -121,7 +122,41 @@ public final class ProtocolHarness {
         sim.quiet();
 
         check("a client on a creative tab is repaired by the prefix", sim.converged());
-        check("the prefix stops before the hotbar", sim.prefixes > 0 && sim.longestPrefix <= 36);
+        // Slot 9 is the only one marked, and slot 9 is its own container slot number, so a prefix
+        // long enough to carry it is ten entries. Not an invariant of the repair - a hotbar mark
+        // takes it to all 45, which is what the scenario below is for - but the bound on what a
+        // pickup costs, which is the reason the prefix is truncated at all.
+        check("a prefix carrying one main-inventory slot stops just after it",
+            sim.server.repairPrefixes > 0 && sim.server.longestRepairPrefix == 10);
+    }
+
+    /**
+     * The other end of that cost. noteForeignSlot is the one caller that can mark 0-8, for a client
+     * this side has reason to believe wrote its own hotbar - and index 0-8 number to 36-44, so the
+     * prefix that carries any of them has already passed every main-inventory slot. The point of the
+     * scenario is that it arrives all the same: a slot no diff can see, because both sides agree on
+     * what was last sent, is still repaired.
+     */
+    private static void aForeignHotbarSlotIsRepairedByTheWholeContainer() {
+        final Sim sim = new Sim(3, true, true);
+        sim.server.seed(20, stack(4, 1), sim.client);
+
+        // Written into the client's array by hand, which is what the divergence looks like from
+        // here: a client whose own slot choice this side does not share emptied hotbar index 3 and
+        // put the stack where this side never heard of. Nothing on the server changed, so the cache
+        // matches, so detectAndSendChanges has nothing to say now or ever.
+        sim.client.inv[3] = stack(8, 12);
+        check("no diff can see a slot only the client wrote", !sim.converged());
+
+        sim.run(2, new Step() { public void run(Sim s) { if (s.now == 0) s.server.noteForeignSlot(3); } });
+        sim.quiet();
+
+        check("a marked hotbar slot is repaired", sim.converged());
+        // Index 3 numbers to 39, so the prefix is 40 entries: slots 9-35 ride along whether they
+        // needed to or not, and index 8 would take it to all 45. That is the price of the mark, and
+        // the reason markStale still refuses 0-8 - it is the diff, and the diff has no reason to.
+        check("and carrying it costs almost the whole container",
+            sim.server.longestRepairPrefix == 40);
     }
 
     /**
@@ -278,6 +313,7 @@ public final class ProtocolHarness {
         final Random rnd = new Random(20260912L);
         int worstRounds = 0;
         int closes = 0;
+        int foreignMarks = 0;
         for (int t = 0; t < trials; t++) {
             final int latency = 1 + rnd.nextInt(20);
             final boolean packetsFirst = rnd.nextBoolean();
@@ -286,6 +322,7 @@ public final class ProtocolHarness {
             final int clickChance = 1 + rnd.nextInt(60);   // percent, per tick
             final int pickupChance = 1 + rnd.nextInt(40);
             final int closeChance = rnd.nextInt(6);
+            final int foreignChance = rnd.nextInt(8);
 
             final Sim sim = new Sim(latency, true, true);
             sim.packetsFirst = packetsFirst;
@@ -313,6 +350,15 @@ public final class ProtocolHarness {
                         s.client.click(inner.nextInt(36), s.now);
                     }
                     if (inner.nextInt(100) < closeChance) s.client.closeWindow(s.now);
+                    if (inner.nextInt(100) < foreignChance) {
+                        // A client running an older build's slot policy, written into its array
+                        // directly: the server's own state does not move, so the cache still matches
+                        // and no diff will ever see this. The mark is the only thing that carries it,
+                        // and 0-8 is the range nothing else can mark.
+                        final int index = inner.nextInt(Model.MAIN_FIRST);
+                        s.client.inv[index] = stack(1 + inner.nextInt(20), 1 + inner.nextInt(60));
+                        s.server.noteForeignSlot(index);
+                    }
                 }
             });
             sim.quiet();
@@ -329,10 +375,13 @@ public final class ProtocolHarness {
             }
             if (sim.server.rounds > worstRounds) worstRounds = sim.server.rounds;
             closes += sim.server.closes();
+            foreignMarks += sim.server.foreignHotbarMarks;
         }
         check(trials + " randomised interleavings converged, 1-20 tick latency (worst "
             + worstRounds + " repair rounds in one trial)", true);
         check("the close path was actually walked (" + closes + " window closes)", closes > 0);
+        check("the foreign-mark path was actually walked (" + foreignMarks + " hotbar marks)",
+            foreignMarks > 0);
     }
 
     // ------------------------------------------------------------------ plumbing
@@ -350,8 +399,6 @@ public final class ProtocolHarness {
 
         int now;
         boolean packetsFirst;
-        int prefixes;
-        int longestPrefix;
 
         Sim(int latency, boolean repair, boolean confirm) {
             up = new Link(latency);
@@ -386,14 +433,7 @@ public final class ProtocolHarness {
 
         private void drainToClient() {
             final List<Pkt> due = down.due(now);
-            for (int i = 0; i < due.size(); i++) {
-                final Pkt p = due.get(i);
-                if (p.kind == Pkt.S30 && p.prefix.length < Model.SLOTS) {
-                    prefixes++;
-                    if (p.prefix.length > longestPrefix) longestPrefix = p.prefix.length;
-                }
-                client.receive(p, now);
-            }
+            for (int i = 0; i < due.size(); i++) client.receive(due.get(i), now);
         }
 
         /** Nothing in flight, no round open, and no slot still marked for a retry. */

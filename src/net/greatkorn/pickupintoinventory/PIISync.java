@@ -50,8 +50,13 @@ import cpw.mods.fml.relauncher.Side;
  * client predicts an insertion without running the same policy this side is running - it does not
  * have the mod, has not been told yet, or is too old to be told at all - its prediction lands in a
  * slot this side did not write, and being predicted is precisely what stops anything else
- * correcting it. Those slots are marked by hand, since the diff has nothing to see; a hotbar one
- * goes back as a window-0 set-slot, which handleSetSlot applies unconditionally.
+ * correcting it. Those slots are marked by hand, since the diff has nothing to see.
+ *
+ * Marking a hotbar slot is the expensive one, and the cost is the slot numbering rather than the
+ * packet: indices 0-8 are container slots 36-44, so the prefix that reaches one has already carried
+ * every slot the diff would ever mark. Index 8 sends all 45. That is the whole of the price - one
+ * S30 either way, a longer one - and it is why the diff still stops at index 9: it has no reason to
+ * pay it.
  *
  * Repairing a hotbar slot can briefly undo a prediction the quiet gate cannot see, since only
  * clicks, creative edits and window closes are counted and an item used or a block placed is
@@ -436,8 +441,9 @@ public final class PIISync {
      *
      * This is the only thing that marks a hotbar slot. Indices 0-8 are otherwise left out on
      * purpose - the client applies those unconditionally and predicts them itself during a click -
-     * but here the prediction is precisely what is wrong. Marking one costs a single window-0
-     * set-slot packet inside a round that is already going out for the slot beside it.
+     * but here the prediction is precisely what is wrong. What marking one costs is length: 0-8 are
+     * container slots 36-44, so the round's prefix runs past all of 9-35 to reach it, and index 8
+     * takes it to the whole container. One packet either way.
      */
     public static void noteForeignSlot(EntityPlayer player, int slot) {
         if (slot < 0 || slot >= MAIN_END) return;
