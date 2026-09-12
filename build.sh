@@ -45,8 +45,11 @@ ASM="asm-9.7.jar:asm-commons-9.7.jar:asm-tree-9.7.jar:asm-analysis-9.7.jar"
 # those two jars, so it is cached. FORCE_REMAP=1 rebuilds it after changing Remap.java.
 if [ ! -f mc-srg.jar ] || [ ! -f forge-srg.jar ] || [ -n "${FORCE_REMAP:-}" ]; then
     rm -rf mappings && mkdir mappings && (cd mappings && unzip -oq "$FPL" '*.csv')
-    # javac 9+ creates the -d directory; javac 8 insists it already exist.
-    mkdir -p remapper
+    # javac 9+ creates the -d directory; javac 8 insists it already exist. Emptied rather
+    # than created, like the mappings beside it: FORCE_REMAP is for rebuilding after a change
+    # to Remap.java, and a nested class it has stopped emitting would otherwise linger here
+    # and stay on the classpath of the two runs below.
+    rm -rf remapper && mkdir remapper
     javac -cp "$ASM" -d remapper "$HERE/tools/Remap.java"
     java -cp "$ASM:remapper" Remap mappings "$MC"    mc-srg.jar
     java -cp "$ASM:remapper" Remap mappings "$FORGE" forge-srg.jar
