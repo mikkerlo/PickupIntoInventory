@@ -5,13 +5,22 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.apache.logging.log4j.Level;
+
+import cpw.mods.fml.common.FMLLog;
 
 /**
  * What each player has asked for, held and persisted by whichever side is the logical server.
@@ -46,6 +55,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * write that dies part way through leaves the previous one whole rather than a truncated stub, and
  * the world's stop flushes synchronously, so the last /pickupinv before a shutdown is on disk
  * before the server is gone.
+ *
+ * <h3>What is still lost, and what is not</h3>
+ *
+ * Moving the write off the tick buys the tick back at the price of a window. A change made in the
+ * second before the machine loses power, or before the JVM is killed outright, is not on disk and
+ * is gone; a change made before an orderly stop is written, because the stop waits for it. That is
+ * the trade, and it is worth stating plainly rather than as "a moment later": the exposure is up
+ * to WRITE_INTERVAL_MS plus one write, not an instant.
+ *
+ * A write that <em>fails</em> is not in that category and must not be treated as one. Recording a
+ * failed write as done loses the change permanently - including at the shutdown flush, which would
+ * find nothing outstanding and return - while the player has already been told it took. So failure
+ * is remembered separately from success: the generation that failed is parked so the writer does
+ * not spin on it once a second forever, and the next real change, or the shutdown, tries again.
  */
 public final class PIIState {
 
@@ -61,11 +84,23 @@ public final class PIIState {
             return this == ON ? "true" : this == OFF ? "false" : "server";
         }
 
-        static Choice parse(String text) {
+        static Choice parse(String key, String text) {
             if ("server".equalsIgnoreCase(text)) return SERVER;
-            // Boolean.valueOf is what 1.3.0 parsed with, down to reading anything it does not
-            // recognise as false; keeping that means an existing file is read back unchanged.
-            return Boolean.valueOf(text) ? ON : OFF;
+            if ("true".equalsIgnoreCase(text)) return ON;
+            if (!"false".equalsIgnoreCase(text)) {
+                // Boolean.valueOf is what 1.3.0 parsed with, down to reading anything it does not
+                // recognise as false, and that behaviour is kept so an existing file is read back
+                // unchanged. What is not kept is the silence: a line torn by the pre-atomic writer
+                // this PR replaced reads as "off" and looks exactly like a deliberate choice, and
+                // a player whose setting quietly inverted has nothing to point at.
+                FMLLog.log(
+                    "PickupIntoInventory",
+                    Level.WARN,
+                    "unrecognised choice %s for %s, reading as off",
+                    text,
+                    key);
+            }
+            return OFF;
         }
     }
 
@@ -85,10 +120,35 @@ public final class PIIState {
     private static final Map<UUID, Choice> OVERRIDES = new ConcurrentHashMap<UUID, Choice>();
 
     /**
+     * How long the shutdown flush will wait for a write already in flight before giving up on it.
+     *
+     * A write to a hung mount - NFS with a dead server, a stalled FUSE filesystem - does not fail,
+     * it blocks, and an uninterruptible one blocks for as long as the mount takes to notice. The
+     * flush is called from the world's stop, so waiting on that indefinitely turns a saved change
+     * into a world that will not shut down, which is the worse of the two.
+     */
+    private static final long FLUSH_WAIT_MS = 5000L;
+
+    /**
+     * How many times, and how far apart, a rename is retried before the write counts as failed.
+     *
+     * On Windows a file this process does not have open can still be held by something else -
+     * Defender mid-scan, OneDrive, a backup agent - and MoveFileEx answers ACCESS_DENIED, which
+     * arrives here as a plain FileSystemException rather than AtomicMoveNotSupportedException, so
+     * the non-atomic fallback is no help at all. Those holders let go in milliseconds.
+     */
+    private static final int REPLACE_ATTEMPTS = 3;
+
+    private static final long REPLACE_BACKOFF_MS = 50L;
+
+    /**
      * Held for a whole write, temp file and rename together, so two of them cannot interleave and
      * an older snapshot cannot land on top of a newer one. Nothing the server thread does takes it.
+     *
+     * A lock rather than a monitor only so the shutdown flush can put a bound on how long it waits
+     * for it; nothing here is reentrant.
      */
-    private static final Object SAVE_LOCK = new Object();
+    private static final ReentrantLock SAVE_LOCK = new ReentrantLock();
 
     /**
      * Guards the two counters and the writer's lifecycle, and is never held across the file I/O -
@@ -101,6 +161,18 @@ public final class PIIState {
 
     /** The counter value the file on disk is known to hold. Equal to 'changed' means nothing due. */
     private static long stored;
+
+    /**
+     * The generation a write failed on, or 0.
+     *
+     * This is what "do not spin" and "give up" used to be conflated into. The writer must not
+     * retry a write the disk has already refused once a second forever, but the change is still
+     * not on disk, and recording it as stored is a silent, permanent loss of something the player
+     * was told had taken. Parking the generation here stops the loop and leaves the work
+     * outstanding: the next real change moves 'changed' past it and the loop runs again, and the
+     * shutdown flush clears it and tries once more regardless.
+     */
+    private static long failedAt;
 
     private static Thread writer;
 
@@ -139,13 +211,17 @@ public final class PIIState {
             p.load(in);
             for (String key : p.stringPropertyNames()) {
                 try {
-                    OVERRIDES.put(UUID.fromString(key), Choice.parse(p.getProperty(key)));
+                    OVERRIDES.put(UUID.fromString(key), Choice.parse(key, p.getProperty(key)));
                 } catch (IllegalArgumentException bad) {
                     // not a UUID - drop the line rather than fail the whole file
                 }
             }
-        } catch (IOException e) {
-            System.err.println("[PickupIntoInventory] could not read " + f + ": " + e);
+            // Properties.load throws IllegalArgumentException - a RuntimeException, not an
+            // IOException - on a malformed \\uxxxx escape, and this runs from preInit, so one
+            // corrupt line in a file nothing but this class writes would take FML down with it.
+            // Losing everyone's saved choice is bad; refusing to start the game is worse.
+        } catch (Exception e) {
+            FMLLog.log("PickupIntoInventory", Level.ERROR, e, "could not read %s", f);
         } finally {
             close(in);
         }
@@ -159,13 +235,22 @@ public final class PIIState {
      * one write already in flight, and it does nothing at all when the file already matches.
      */
     public static void flush() {
-        writePending();
+        synchronized (PENDING_LOCK) {
+            // A write that failed earlier is exactly the one most worth another go here: the
+            // change is still only in memory, and after this there is no later attempt to have.
+            failedAt = 0;
+        }
+        writePending(FLUSH_WAIT_MS);
     }
 
     /** Started on the first real change rather than at load, so a client that never touches its
      *  setting - and a dedicated server nobody plays on - never pays for a thread. */
     private static void startWriter() { // caller holds PENDING_LOCK
-        if (writer != null) return;
+        // isAlive as well as null, because writeLoop clears the field in a finally: a change made
+        // between a RuntimeException unwinding the loop and that finally running would otherwise
+        // see a thread that is on its way out, decline to start a replacement, and be the last
+        // change this process ever writes.
+        if (writer != null && writer.isAlive()) return;
         writer = new Thread(new Runnable() {
 
             @Override
@@ -183,9 +268,13 @@ public final class PIIState {
         try {
             while (true) {
                 synchronized (PENDING_LOCK) {
-                    while (stored == changed) PENDING_LOCK.wait();
+                    // changed == failedAt is the "already refused, nothing new since" state. It is
+                    // not the same as stored == changed: the work is still outstanding, it is just
+                    // not worth reattempting until something moves. A new change moves 'changed'
+                    // past failedAt and this wakes; so does flush(), which clears it.
+                    while (stored == changed || changed == failedAt) PENDING_LOCK.wait();
                 }
-                writePending();
+                writePending(0L);
                 // Not a delay before writing, which would widen the window a crash can lose - the
                 // change just made goes out immediately. This only paces what comes after it, so
                 // everything that arrives during the pause is merged into the next snapshot.
@@ -209,14 +298,37 @@ public final class PIIState {
      * thread and safe to call when there is nothing to do, which is what lets the shutdown path and
      * the writer thread share one implementation instead of racing two.
      */
-    private static void writePending() {
-        synchronized (SAVE_LOCK) {
+    private static void writePending(long waitMs) {
+        if (waitMs <= 0) {
+            SAVE_LOCK.lock();
+        } else {
+            boolean taken;
+            try {
+                taken = SAVE_LOCK.tryLock(waitMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                taken = false;
+            }
+            if (!taken) {
+                // Someone else's write is stuck, not ours to wait out. Say so rather than hold the
+                // shutdown open on a mount that may never answer.
+                FMLLog.log(
+                    "PickupIntoInventory",
+                    Level.ERROR,
+                    "a write was still in progress after %d ms; recent preference changes may not"
+                        + " have reached disk",
+                    waitMs);
+                return;
+            }
+        }
+        try {
             final File target = file;
             final long generation;
             synchronized (PENDING_LOCK) {
                 if (stored == changed) return;
                 generation = changed;
             }
+            boolean written = false;
             if (target != null) {
                 // Copied after the counter was read and outside that lock, so a change made on the
                 // server thread waits for nothing here. set() puts its value in the map before
@@ -228,16 +340,24 @@ public final class PIIState {
                 for (Map.Entry<UUID, Choice> e : OVERRIDES.entrySet()) {
                     snapshot.setProperty(e.getKey().toString(), e.getValue().token());
                 }
-                write(target, snapshot);
+                written = write(target, snapshot);
             }
             synchronized (PENDING_LOCK) {
-                // Recorded even when the write failed, and even when there was no file to write to.
-                // The alternative is a writer thread that finds work outstanding every time it
-                // looks and re-attempts a write the disk has already refused, once a second,
-                // forever. The error is reported; the next real change is what retries it.
-                if (stored < generation) stored = generation;
+                if (written) {
+                    if (stored < generation) stored = generation;
+                    failedAt = 0;
+                } else {
+                    // Not recorded as stored. A failed write is still an outstanding change, and
+                    // calling it done loses it for good - the shutdown flush would find nothing to
+                    // do - while the command and the packet handler have both already told the
+                    // player it took. Parking the generation is only what stops the writer
+                    // reattempting it once a second forever; the work stays on the books.
+                    failedAt = generation;
+                }
                 PENDING_LOCK.notifyAll();
             }
+        } finally {
+            SAVE_LOCK.unlock();
         }
     }
 
@@ -248,7 +368,7 @@ public final class PIIState {
      * anything that stopped the process there, a crash, a kill, a full disk, left an empty file
      * behind and put everybody back on the server default at the next start.
      */
-    private static void write(File target, Properties contents) {
+    private static boolean write(File target, Properties contents) {
         // Beside the real file rather than in a temp directory, so the rename below is within one
         // filesystem and cannot degrade into a copy.
         final File temporary =
@@ -266,8 +386,15 @@ public final class PIIState {
             out.close();
             out = null;
             replace(temporary, target);
+            // The rename itself is metadata, and metadata reaches the disk on the filesystem's own
+            // schedule. Without this the file's contents are durable and the name pointing at them
+            // is not, so a crash in the seconds after a write can come back to the previous file -
+            // the one case the atomic replace above was supposed to have removed.
+            syncDirectory(target);
+            return true;
         } catch (IOException e) {
-            System.err.println("[PickupIntoInventory] could not write " + target + ": " + e);
+            FMLLog.log("PickupIntoInventory", Level.ERROR, e, "could not write %s", target);
+            return false;
         } finally {
             close(out);
             // On the way out through the failure path this is a half-written file nobody should
@@ -286,10 +413,49 @@ public final class PIIState {
      * the length of a write not existing.
      */
     private static void replace(File temporary, File target) throws IOException {
+        IOException last = null;
+        for (int attempt = 0; attempt < REPLACE_ATTEMPTS; attempt++) {
+            if (attempt > 0) {
+                try {
+                    Thread.sleep(REPLACE_BACKOFF_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            try {
+                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE);
+                return;
+            } catch (AtomicMoveNotSupportedException notAtomic) {
+                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (IOException busy) {
+                // The Windows case: something outside this process has the target open, MoveFileEx
+                // answers ACCESS_DENIED, and it arrives as a generic FileSystemException, so the
+                // fallback above never sees it. Whoever has it lets go in milliseconds.
+                last = busy;
+            }
+        }
+        throw last;
+    }
+
+    /**
+     * Best effort, and deliberately quiet about failing. Opening a directory for read is a POSIX
+     * idea; Windows refuses it outright, and there the rename is ordered by the filesystem anyway.
+     */
+    private static void syncDirectory(File target) {
+        final Path parent = target.getAbsoluteFile().toPath().getParent();
+        if (parent == null) return;
+        FileChannel channel = null;
         try {
-            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException notAtomic) {
-            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            channel = FileChannel.open(parent, StandardOpenOption.READ);
+            channel.force(true);
+        } catch (IOException unsupported) {
+            // no directory fsync here; the contents are still durable
+        } catch (RuntimeException unsupported) {
+            // UnsupportedOperationException on a provider that will not open a directory
+        } finally {
+            close(channel);
         }
     }
 

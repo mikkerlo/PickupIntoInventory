@@ -6,8 +6,8 @@
 #   LIBS  launcher libraries dir                   default ~/PrismLauncher/libraries
 #
 # Any individual jar can be pointed elsewhere instead, which is how CI supplies them:
-#   UNIMIXINS FPL MC FORGE NETTY
-# ci/fetch-deps.sh downloads all five from their public homes and prints those exports.
+#   UNIMIXINS FPL MC FORGE NETTY LOG4J
+# ci/fetch-deps.sh downloads all six from their public homes and prints those exports.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,6 +22,7 @@ LIBS="${LIBS:-$HOME/PrismLauncher/libraries}"
 : "${MC:=$LIBS/com/mojang/minecraft/1.7.10/minecraft-1.7.10-client.jar}"
 : "${FORGE:=$(ls "$LIBS"/net/minecraftforge/forge/1.7.10-*/forge-1.7.10-*-universal.jar | head -1)}"
 : "${NETTY:=$(ls "$LIBS"/io/netty/netty-all/*/netty-all-*.jar | head -1)}"
+: "${LOG4J:=$(ls "$LIBS"/org/apache/logging/log4j/log4j-api/*/log4j-api-*.jar | head -1)}"
 
 # --release arrived in JDK 9, and the JDK on hand for a 1.7.10 mod is quite often 8, which
 # rejects the flag outright. Nothing is lost there: on 8, -source/-target compile against that
@@ -61,7 +62,7 @@ cd "$HERE"
 rm -rf "$WORK/classes" && mkdir -p "$WORK/classes"
 # -proc:none: we hand-wrote SRG targets, so the Mixin AP must not try to build a refmap.
 javac "${JAVA8[@]}" -proc:none -nowarn \
-      -cp "$WORK/tools/mc-srg.jar:$WORK/tools/forge-srg.jar:$UNIMIXINS:$NETTY" \
+      -cp "$WORK/tools/mc-srg.jar:$WORK/tools/forge-srg.jar:$UNIMIXINS:$NETTY:$LOG4J" \
       -d "$WORK/classes" $(find src -name '*.java')
 cp -r resources/* "$WORK/classes/"
 jar cfm "$WORK/pickupintoinventory-$VERSION.jar" manifest.txt -C "$WORK/classes" .
