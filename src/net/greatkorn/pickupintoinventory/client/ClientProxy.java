@@ -26,9 +26,12 @@ public class ClientProxy extends CommonProxy {
      * FML posts ClientConnectedToServerEvent and ClientDisconnectionFromServerEvent from inside its
      * own pipeline handler - FMLHandshakeClientState$6.accept -> NetworkDispatcher.completeHandshake
      * -> completeClientSideConnection, all under channelRead0 - not from the client thread's packet
-     * queue. The queue is where policyReceived runs, which is a different thread again. Nothing here
-     * is a compound update, so volatile is the whole of what is needed; the visible symptom of it
-     * missing was a clear at disconnect that the tick handler never saw.
+     * queue. The queue is where policyReceived runs, which is a different thread again. This field is
+     * only ever stored to, never read-modify-written, so volatile is the whole of what it needs; the
+     * visible symptom of it missing was a clear at disconnect that the tick handler never saw.
+     *
+     * That is a property of this field and not a rule for the ones beside it - see `login`, which
+     * volatile does not make atomic and does not need to be.
      */
     private volatile boolean connected;
 
@@ -57,6 +60,14 @@ public class ClientProxy extends CommonProxy {
      * one it can answer, so it never sends a policy, this side predicts vanilla routing for the
      * rest of the session and the keybind reports that the mod is not on the server. One resend a
      * couple of seconds in costs a client that was answered nothing at all.
+     *
+     * volatile here is for visibility only, and this is the one field that is not merely stored to:
+     * the tick handler's ++login is a read-modify-write against the netty thread's `login = 1`, and
+     * volatile does not make that atomic. A connect landing between the read and the write is lost
+     * and the count carries on from where it was. What that costs is a retry fired at the wrong
+     * tick - a few ticks early or late on a path that checks clientKnows() before it sends anything,
+     * and whose whole purpose is to be harmless when it was not needed. An AtomicInteger would buy
+     * exactness nothing here spends.
      */
     private volatile int login;
 

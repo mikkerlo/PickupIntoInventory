@@ -78,6 +78,18 @@ final class ServerModel {
 
     int rounds;
 
+    /**
+     * Counted here rather than off the wire because only this side knows which S30 is a repair:
+     * vanilla's own rejection path sends a full-length one too, and the harness used to tell the two
+     * apart by length - which is exactly the test a hotbar mark breaks, because then the repair is
+     * full length as well. The link is lossless, so what is emitted is what arrives.
+     */
+    int repairPrefixes;
+    int longestRepairPrefix;
+
+    /** How many times noteForeignSlot was given a hotbar index, which nothing else can mark. */
+    int foreignHotbarMarks;
+
     ServerModel(Link toClient, boolean repair, boolean confirm) {
         this.toClient = toClient;
         this.repair = repair;
@@ -98,7 +110,7 @@ final class ServerModel {
         for (int i = Model.MAIN_FIRST; i < Model.MAIN_END; i++) {
             if (inv[i] != 0) continue;
             inv[i] = stack;
-            mark(i);
+            markStale(i);
             return i;
         }
         return -1;
@@ -108,10 +120,34 @@ final class ServerModel {
     boolean merge(int index) {
         if (inv[index] == 0) return false;
         inv[index] = inv[index] + 1; // count is the low byte
-        mark(index);
+        markStale(index);
         return true;
     }
 
+    /**
+     * PIISync.noteForeignSlot: one slot a client not running this side's policy is believed to have
+     * written itself, or to have left empty where this side filled it. It is the only thing that
+     * marks the hotbar - 0-8 are otherwise left out because the client applies those unconditionally
+     * and predicts them itself during a click, and here the prediction is exactly what is wrong.
+     *
+     * What the model does not simulate is the divergence itself: click() here is a cursor swap, not
+     * Container.slotClick's number-key swap, and this side does no routing at all. A scenario writes
+     * the client's array by hand and then calls this, which is the state the redirect hands over and
+     * the only part the repair has any say in.
+     */
+    void noteForeignSlot(int index) {
+        if (index < 0 || index >= Model.MAIN_END) return;
+        if (index < Model.MAIN_FIRST) foreignHotbarMarks++;
+        mark(index);
+    }
+
+    /** PIISync.markStale: the pickup diff, which starts at MAIN_FIRST and never sees the hotbar. */
+    private void markStale(int slot) {
+        if (slot < Model.MAIN_FIRST || slot >= Model.MAIN_END) return;
+        mark(slot);
+    }
+
+    /** Pending.mark, which takes any index either caller hands it. */
     private void mark(int slot) {
         if (!repair) return;
         hasPending = true;
@@ -280,7 +316,9 @@ final class ServerModel {
     }
 
     private void restoreRepair() {
-        for (int i = Model.MAIN_FIRST; i < Model.MAIN_END; i++) {
+        // From zero, with sendRepair below and for the same reason: noteForeignSlot marks 0-8, and
+        // a mark this loop skips is one the round quietly drops instead of putting back.
+        for (int i = 0; i < Model.MAIN_END; i++) {
             if (!sent[i] || stale[i]) continue;
             stale[i] = true;
             staleCount++;
@@ -294,18 +332,24 @@ final class ServerModel {
      * One window-0 S30 truncated after the highest marked slot. handleWindowItems applies a window-0
      * packet to inventoryContainer with no test at all, so this is the one address whose delivery
      * the server can reason about without knowing what is on screen.
+     *
+     * From zero, not from MAIN_FIRST. The pickup diff never marks a hotbar index, but
+     * noteForeignSlot does, and a mark the loop starts above is worth nothing: the round still goes
+     * out, the echo still settles it clean, and dropRepair throws the mark away. The bound is also
+     * the cost: index 0-8 numbers to 36-44, so one hotbar mark takes the prefix to the whole
+     * container rather than to the ten or so slots a pickup needs.
      */
     private void sendRepair(int now) {
         if (perSlot) { sendRepairPerSlot(now); return; }
 
         int snapshotUpTo = -1;
-        for (int i = Model.MAIN_FIRST; i < Model.MAIN_END; i++) {
+        for (int i = 0; i < Model.MAIN_END; i++) {
             if (!sent[i]) continue;
             final int slotNumber = Model.slotNumber(i);
             if (slotNumber > snapshotUpTo) snapshotUpTo = slotNumber;
         }
         if (snapshotUpTo < 0) return;
-        toClient.send(Pkt.windowItems(0, contents(snapshotUpTo + 1)), now);
+        sendRepairPrefix(snapshotUpTo, now);
     }
 
     /**
@@ -319,7 +363,7 @@ final class ServerModel {
      */
     private void sendRepairPerSlot(int now) {
         int snapshotUpTo = -1;
-        for (int i = Model.MAIN_FIRST; i < Model.MAIN_END; i++) {
+        for (int i = 0; i < Model.MAIN_END; i++) {
             if (!sent[i]) continue;
             final int slotNumber = Model.slotNumber(i);
             if (!creative) {
@@ -329,7 +373,14 @@ final class ServerModel {
             if (slotNumber > snapshotUpTo) snapshotUpTo = slotNumber;
         }
         if (snapshotUpTo < 0) return;
-        toClient.send(Pkt.windowItems(0, contents(snapshotUpTo + 1)), now);
+        sendRepairPrefix(snapshotUpTo, now);
+    }
+
+    private void sendRepairPrefix(int snapshotUpTo, int now) {
+        final int[] prefix = contents(snapshotUpTo + 1);
+        repairPrefixes++;
+        if (prefix.length > longestRepairPrefix) longestRepairPrefix = prefix.length;
+        toClient.send(Pkt.windowItems(0, prefix), now);
     }
 
     private int[] contents(int upTo) {
